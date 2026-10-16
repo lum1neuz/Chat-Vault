@@ -614,16 +614,21 @@ pub struct DayCount {
 }
 
 #[derive(Serialize)]
-pub struct NameCount {
+#[serde(rename_all = "camelCase")]
+pub struct ProjectStat {
     pub name: String,
     pub count: i64,
+    pub claude: i64,
+    pub codex: i64,
+    pub cursor: i64,
+    pub last_ms: i64,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub daily: Vec<DayCount>,
-    pub projects: Vec<NameCount>,
+    pub projects: Vec<ProjectStat>,
     pub size_claude: i64,
     pub size_codex: i64,
 }
@@ -641,10 +646,15 @@ pub fn stats(days: i64) -> Result<Stats, String> {
         .flatten()
         .collect();
     let mut st = c
-        .prepare("SELECT project, COUNT(*) n FROM chats GROUP BY project ORDER BY n DESC, project LIMIT 6")
+        .prepare(
+            "SELECT project, COUNT(*) n, SUM(provider='claude'), SUM(provider='codex'), SUM(provider='cursor'), MAX(last_ms)
+             FROM chats GROUP BY project ORDER BY n DESC, project LIMIT 6",
+        )
         .map_err(|e| e.to_string())?;
     let projects = st
-        .query_map([], |r| Ok(NameCount { name: r.get(0)?, count: r.get(1)? }))
+        .query_map([], |r| {
+            Ok(ProjectStat { name: r.get(0)?, count: r.get(1)?, claude: r.get(2)?, codex: r.get(3)?, cursor: r.get(4)?, last_ms: r.get(5)? })
+        })
         .map_err(|e| e.to_string())?
         .flatten()
         .collect();

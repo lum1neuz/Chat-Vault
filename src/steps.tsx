@@ -3,7 +3,7 @@ import { Bot, Brain, CircleCheck, CircleDashed, Circle, Globe, ListTodo, Termina
 import { Badge } from "@/components/ui/badge";
 import { CodeBlock, CodeBlockContent } from "@/components/ui/code-block";
 import { Trace, TraceCollapsible, TraceCollapsibleContent, TraceCollapsibleTrigger, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
-import { Highlight } from "@/highlight";
+import { Highlight, textHas } from "@/highlight";
 import { hostname, uniqueUrls } from "@/ai-elements";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Msg } from "@/chat-actions";
@@ -101,14 +101,14 @@ export function SubagentBlock({ item }: { item: Item }) {
         <TraceCollapsibleContent className="flex flex-col gap-3">
           {str(d.prompt) && (
             <CodeBlock size="sm">
-              <CodeBlockContent wrap className="max-h-48">
+              <CodeBlockContent data-lenis-prevent wrap className="max-h-48">
                 {str(d.prompt)}
               </CodeBlockContent>
             </CodeBlock>
           )}
           {item.result?.text && (
             <CodeBlock size="sm">
-              <CodeBlockContent wrap className="max-h-64">
+              <CodeBlockContent data-lenis-prevent wrap className="max-h-64">
                 {item.result.text}
               </CodeBlockContent>
             </CodeBlock>
@@ -127,7 +127,7 @@ export function StepItem({ item, q }: { item: Item; q: string }) {
   if (item.kind === "reasoning") {
     return (
       <Trace>
-        <TraceCollapsible open={open || (!!q && item.text.toLowerCase().includes(q.toLowerCase()))} onOpenChange={setOpen}>
+        <TraceCollapsible open={open || (!!q && textHas(item.text, q))} onOpenChange={setOpen}>
           <TraceCollapsibleTrigger>
             <TraceLine>
               <TraceIcon>
@@ -163,7 +163,7 @@ export function StepItem({ item, q }: { item: Item; q: string }) {
           </TraceCollapsibleTrigger>
           <TraceCollapsibleContent>
             <CodeBlock size="sm">
-              <CodeBlockContent wrap className="max-h-64">
+              <CodeBlockContent data-lenis-prevent wrap className="max-h-64">
                 {`$ ${cmd}${out ? `\n${out}` : ""}`}
               </CodeBlockContent>
             </CodeBlock>

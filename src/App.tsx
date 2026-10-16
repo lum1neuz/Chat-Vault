@@ -9,9 +9,10 @@ import {
   FolderOpen,
   Trash2,
   ArrowUpDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   ListFilter,
-  PanelLeftClose,
-  PanelLeftOpen,
+  PanelLeft,
   RotateCcw,
   LayoutDashboard,
   Loader2,
@@ -31,7 +32,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -41,6 +41,7 @@ import { cn } from "@/lib/utils";
 import { AppLogo, ProviderLogo } from "@/claude-logo";
 import { PROVIDERS, PROVIDER_NAME, PROVIDER_SHORT, accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { ChatView } from "@/chat-view";
+import { FadedScroll } from "@/faded-scroll";
 import { OverviewPage } from "@/overview";
 import { CommandPalette } from "@/command-palette";
 import {
@@ -312,6 +313,8 @@ export default function App() {
   const lq = q.toLowerCase();
   const pinnedShown = pinned.filter((c) => !lq || named(c).title.toLowerCase().includes(lq) || c.project.toLowerCase().includes(lq));
   const recent = items.filter((c) => !pinSet.has(chatKey(c)));
+  const projectNames = useMemo(() => groupByProject(recent).map(([name]) => name), [recent]);
+  const allProjectsClosed = projectNames.length > 0 && projectNames.every((n) => closedProjects.includes(n));
   const msgs: Msg[] | null = page?.messages ?? null;
 
   const extras = (c: Chat): ChatAction[] => orderChat(([
@@ -381,30 +384,31 @@ export default function App() {
     <TooltipProvider delay={200}>
       <div className="flex h-screen bg-background text-foreground">
         {/* Sidebar */}
-        <aside className={cn("flex shrink-0 flex-col overflow-hidden border-r transition-[width] duration-300 ease-in-out", sidebarOpen ? "w-[360px]" : "w-[68px]")}>
-          <div className="flex shrink-0 items-center gap-1 p-3">
-            <Tip label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}>
-              <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" aria-label="Toggle sidebar" onClick={() => setSidebarOpen((o) => !o)}>
-                {sidebarOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
-              </Button>
-            </Tip>
-            <button
-              onClick={() => setSelected(null)}
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-xl p-1 text-left transition hover:bg-muted/60"
-              title="Back to the overview"
-            >
-              <AppLogo className="size-9 shrink-0 rounded-xl ring-1 ring-border" />
-              <div className="min-w-0">
-                <h1 className="truncate text-base font-medium leading-tight">ChatVault</h1>
-                {indexing && (
-                  <p className="truncate text-xs text-muted-foreground">
-                    {indexing.total ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()}` : "Scanning this PC…"}
-                  </p>
-                )}
-              </div>
-            </button>
-          </div>
-          <div className={cn("flex min-h-0 w-[360px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
+        <aside className={cn("flex shrink-0 flex-col overflow-hidden border-r transition-[width] duration-300 ease-in-out", sidebarOpen ? "w-[320px]" : "w-0 border-r-0")}>
+          {sidebarOpen ? (
+            <div className="flex h-14 shrink-0 items-center gap-1 px-3">
+              <button
+                onClick={() => setSelected(null)}
+                className="flex min-w-0 flex-1 cursor-default items-center gap-2.5 p-1 text-left outline-none"
+              >
+                <AppLogo className="size-7 shrink-0 rounded-lg ring-1 ring-border" />
+                <div className="min-w-0">
+                  <h1 className="truncate text-base font-medium leading-tight">ChatVault</h1>
+                  {indexing && (
+                    <p className="truncate text-xs text-muted-foreground">
+                      {indexing.total ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()}` : "Scanning this PC…"}
+                    </p>
+                  )}
+                </div>
+              </button>
+              <Tip label="Hide the sidebar">
+                <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" aria-label="Hide the sidebar" onClick={() => setSidebarOpen(false)}>
+                  <PanelLeft className="size-4" />
+                </Button>
+              </Tip>
+            </div>
+          ) : null}
+          <div className={cn("flex min-h-0 w-[320px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
 
           <div className="space-y-2 px-3 pb-2">
             <Tabs value={provider} onValueChange={(v) => switchProvider(v as Provider)}>
@@ -413,7 +417,6 @@ export default function App() {
                   <TabsTrigger key={p} value={p} className="gap-1.5">
                     <ProviderLogo provider={p} className="size-4" />
                     {PROVIDER_SHORT[p]}
-                    <span className="text-xs text-muted-foreground">{overview[p] ? overview[p]!.total.toLocaleString() : "…"}</span>
                   </TabsTrigger>
                 ))}
               </TabsList>
@@ -422,7 +425,7 @@ export default function App() {
               <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
               <Input
                 className="h-9 pl-8"
-                placeholder="Filter by title, or press Enter to search inside chats"
+                placeholder="Search chats"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && runDeepSearch()}
@@ -453,7 +456,7 @@ export default function App() {
           </div>
           <Separator />
 
-          <ScrollArea className="min-h-0 flex-1">
+          <FadedScroll className="flex-1" fadeTop={false}>
             <div className="p-1.5 pr-3.5">
               {pinnedShown.length > 0 && (
                 <Section title="Pinned" count={pinnedShown.length} open={pinnedOpen} onOpenChange={setPinnedOpen}>
@@ -466,6 +469,20 @@ export default function App() {
                 open={recentOpen}
                 onOpenChange={setRecentOpen}
                 action={
+                  <div className="flex items-center">
+                    {organize === "project" && (
+                      <Tip label={allProjectsClosed ? "Expand all projects" : "Collapse all projects"}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={allProjectsClosed ? "Expand all projects" : "Collapse all projects"}
+                          className="size-7 shrink-0 text-muted-foreground"
+                          onClick={() => setClosedProjects(allProjectsClosed ? [] : projectNames)}
+                        >
+                          {allProjectsClosed ? <ChevronsUpDown className="size-4" /> : <ChevronsDownUp className="size-4" />}
+                        </Button>
+                      </Tip>
+                    )}
                   <FiltersMenu
                     sort={sort}
                     scope={scope}
@@ -479,6 +496,7 @@ export default function App() {
                       setOrganize("list");
                     }}
                   />
+                  </div>
                 }
               >
                 {error && <p className="p-3 text-sm text-destructive">{error}</p>}
@@ -518,14 +536,14 @@ export default function App() {
                 )}
               </Section>
             </div>
-          </ScrollArea>
+          </FadedScroll>
           </div>
         </aside>
 
         {/* Content */}
         <main className="flex min-w-0 flex-1 flex-col">
           {selected && (
-            <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+            <div className={cn("flex h-14 shrink-0 items-center gap-2 border-b px-4", !sidebarOpen && "pl-14")}>
               <p className="min-w-0 flex-1 truncate text-sm font-medium">{`${PROVIDER_NAME[selected.provider]} / ${selected.project}`}</p>
               {controls}
             </div>
@@ -585,6 +603,15 @@ export default function App() {
             { id: "theme", label: dark ? "Switch to the light theme" : "Switch to the dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
           ]}
         />
+        {!sidebarOpen && (
+          <div className="fixed left-3 top-3 z-40">
+            <Tip label="Show the sidebar">
+              <Button variant="outline" size="icon" aria-label="Show the sidebar" onClick={() => setSidebarOpen(true)}>
+                <PanelLeft className="size-4" />
+              </Button>
+            </Tip>
+          </div>
+        )}
         <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />
         <DeleteDialog
           chat={deleting}
@@ -734,10 +761,10 @@ const ChatRow = memo(function ChatRow({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => e.key === "Enter" && onOpen()}
-      className={cn("group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted", selected && "border-border bg-muted")}
+      className={cn("group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted/50 dark:hover:bg-white/5", selected && "border-border bg-muted hover:bg-muted dark:border-white/15 dark:bg-white/10 dark:hover:bg-white/10")}
     >
       <div className="flex items-start gap-2.5">
-        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-background">
+        <div className={cn("mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-white dark:group-hover:bg-white/10", selected && "bg-white dark:bg-white/10")}>
           <ProviderLogo provider={chat.provider} className="size-5" />
         </div>
         <div className="min-w-0 flex-1">
@@ -827,7 +854,7 @@ function RenameDialog({ chat, current, onClose, onSave }: { chat: Chat | null; c
             </div>
             <div className="min-w-0">
               <DialogTitle className="text-base font-medium">Rename chat</DialogTitle>
-              <DialogDescription>Only ChatVault shows this name. The original chat is not changed.</DialogDescription>
+              <DialogDescription>Only shown in ChatVault.</DialogDescription>
             </div>
           </div>
         </DialogHeader>
@@ -839,10 +866,7 @@ function RenameDialog({ chat, current, onClose, onSave }: { chat: Chat | null; c
           className="space-y-4"
         >
           <Input autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder="Chat name" maxLength={120} />
-          <DialogFooter className="grid grid-cols-3 gap-2 sm:flex">
-            <Button type="button" variant="ghost" disabled={!current} onClick={() => onSave("")}>
-              Reset
-            </Button>
+          <DialogFooter className="grid grid-cols-2 gap-2 sm:flex">
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
@@ -871,6 +895,31 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
     };
   }, [open]);
   const groups = ["Chat", "Continue", "Open", "Copy"] as const;
+  const renderItem = (a: ChatAction) => {
+    const Icon = a.icon;
+    return (
+      <button
+        key={a.id}
+        title={a.hint}
+        disabled={busyId !== null}
+        className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && "text-destructive hover:bg-destructive/10")}
+        onClick={async () => {
+          setBusyId(a.id);
+          try {
+            await a.run();
+            setOpen(false);
+          } catch (e) {
+            toast(String(e));
+          } finally {
+            setBusyId(null);
+          }
+        }}
+      >
+        {busyId === a.id ? <Loader2 className="size-4 animate-spin" /> : <Icon className={cn("size-4", a.danger ? "text-destructive" : "text-muted-foreground")} strokeWidth={1.5} />}
+        {a.label}
+      </button>
+    );
+  };
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -891,40 +940,22 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
       </PopoverTrigger>
       <PopoverContent align="end" className="w-64 gap-0 p-1" onClick={(e) => e.stopPropagation()}>
         {groups.map((g, gi) => {
-          const items = actions.filter((a) => a.group === g);
+          const items = actions.filter((a) => a.group === g && !a.danger);
           if (!items.length) return null;
           return (
             <div key={g}>
               {gi > 0 && <Separator className="my-1" />}
               {g !== "Chat" && <p className="px-2 pb-0.5 pt-1.5 text-xs text-muted-foreground">{g}</p>}
-              {items.map((a) => {
-                const Icon = a.icon;
-                return (
-                  <button
-                    key={a.id}
-                    title={a.hint}
-                    disabled={busyId !== null}
-                    className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && "text-destructive hover:bg-destructive/10")}
-                    onClick={async () => {
-                      setBusyId(a.id);
-                      try {
-                        await a.run();
-                        setOpen(false);
-                      } catch (e) {
-                        toast(String(e));
-                      } finally {
-                        setBusyId(null);
-                      }
-                    }}
-                  >
-                    {busyId === a.id ? <Loader2 className="size-4 animate-spin" /> : <Icon className={cn("size-4", a.danger ? "text-destructive" : "text-muted-foreground")} strokeWidth={1.5} />}
-                    {a.label}
-                  </button>
-                );
-              })}
+              {items.map(renderItem)}
             </div>
           );
         })}
+        {actions.some((a) => a.danger) && (
+          <div>
+            <Separator className="my-1" />
+            {actions.filter((a) => a.danger).map(renderItem)}
+          </div>
+        )}
       </PopoverContent>
     </Popover>
   );

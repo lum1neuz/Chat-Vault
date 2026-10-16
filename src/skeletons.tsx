@@ -65,7 +65,8 @@ export function MessagesSkeleton() {
 /** The chat header while a chat is loading. */
 export function HeaderSkeleton() {
   return (
-    <div className="space-y-3 border-b p-4" aria-busy="true">
+    <div className="border-b py-3" aria-busy="true">
+      <div className="w-full space-y-3 px-4">
       <div className="flex items-center gap-3">
         <Skeleton className="size-9 rounded-lg" />
         <Skeleton className="h-5 w-64" />
@@ -85,6 +86,7 @@ export function HeaderSkeleton() {
         <Skeleton className="h-5 w-40 rounded-full" />
         <Skeleton className="h-5 w-28 rounded-full" />
         <Skeleton className="h-4 w-52" />
+      </div>
       </div>
     </div>
   );

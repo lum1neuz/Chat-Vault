@@ -64,7 +64,7 @@ export function CursorLogo({ className }: { className?: string }) {
   );
 }
 
-/** The ChatVault app icon. */
+/** The ChatVault app icon: a chat bubble with three dots. */
 export function AppLogo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 1024 1024" className={className} aria-hidden="true">

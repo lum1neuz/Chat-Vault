@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
+  Archive,
   ArrowDown,
   Check,
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Clock,
+  Cpu,
+  HardDrive,
+  MessageSquare,
   Copy,
   FileText,
   ListTree,
   Loader2,
-  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -20,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,10 +42,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import Lenis from "lenis";
+import "lenis/dist/lenis.css";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
-import { Highlight, MessageBody } from "@/message-body";
-import { PROVIDER_NAME, PROVIDER_SHORT, accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { MessageBody } from "@/message-body";
+import { Highlight, textHas } from "@/highlight";
+import { PROVIDER_SHORT, chatActions, fmtDate, fmtSize, type Chat, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { HeaderSkeleton, MessagesSkeleton } from "@/skeletons";
 import { PlanBlock, StepItem, SubagentBlock, isAgent, isPlan, mergeResults, stepName, type Item } from "@/steps";
 
@@ -78,6 +86,7 @@ export function ChatView(p: Props) {
   const [q, setQ] = useState("");
   const [cur, setCur] = useState(0);
   const [showJump, setShowJump] = useState(false);
+  const [atTop, setAtTop] = useState(true);
   const [activeTick, setActiveTick] = useState(0);
   const [loadingAll, setLoadingAll] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -87,6 +96,39 @@ export function ChatView(p: Props) {
   const merged = useMemo(() => (page ? mergeResults(page.messages) : []), [page]);
   const shown = useMemo(() => merged.filter((m) => p.showSteps || (m.kind !== "tool" && m.kind !== "reasoning")), [merged, p.showSteps]);
   const viewport = useCallback(() => wrapRef.current?.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]") ?? null, []);
+
+  // Smooth, eased wheel and touch scrolling for the message list.
+  const lenisRef = useRef<Lenis | null>(null);
+  const ready = page !== null;
+  useEffect(() => {
+    const el = viewport();
+    const content = el?.firstElementChild as HTMLElement | null | undefined;
+    if (!el || !content || !ready) return;
+    const lenis = new Lenis({ wrapper: el, content, duration: 1, wheelMultiplier: 0.9, touchMultiplier: 1.2, smoothWheel: true });
+    lenisRef.current = lenis;
+    let id = requestAnimationFrame(function loop(time) {
+      lenis.raf(time);
+      id = requestAnimationFrame(loop);
+    });
+    return () => {
+      cancelAnimationFrame(id);
+      lenis.destroy();
+      lenisRef.current = null;
+    };
+  }, [viewport, chat.id, ready]);
+
+  /** Scrolls an element into place, with the same easing as the wheel. */
+  const goTo = useCallback(
+    (node: HTMLElement | null | undefined, align: "start" | "center") => {
+      const el = viewport();
+      if (!node || !el) return;
+      const top = el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const target = align === "center" ? top - (el.clientHeight / 2 - node.offsetHeight / 2) : top - 16;
+      if (lenisRef.current) lenisRef.current.scrollTo(Math.max(0, target), { duration: 1 });
+      else el.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    },
+    [viewport],
+  );
 
   // Consecutive tool steps collapse into one Trace.
   const blocks = useMemo(() => {
@@ -106,10 +148,9 @@ export function ChatView(p: Props) {
   const query = searchOpen ? q.trim() : "";
   const matches = useMemo(() => {
     if (!query) return [] as number[];
-    const lq = query.toLowerCase();
     const out: number[] = [];
     shown.forEach((m, i) => {
-      if (m.kind !== "image" && m.text.toLowerCase().includes(lq)) out.push(i);
+      if (m.kind !== "image" && textHas(m.text, query)) out.push(i);
     });
     return out;
   }, [shown, query]);
@@ -117,8 +158,8 @@ export function ChatView(p: Props) {
   useEffect(() => setCur(0), [query, chat.id]);
   useEffect(() => {
     if (matchIndex < 0) return;
-    els.current[matches[matchIndex]]?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [matchIndex, matches]);
+    goTo(els.current[matches[matchIndex]], "center");
+  }, [matchIndex, matches, goTo]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -149,6 +190,7 @@ export function ChatView(p: Props) {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 400);
+        setAtTop(el.scrollTop < 8);
         const line = el.scrollTop + 120;
         let active = 0;
         ticks.forEach((t, k) => {
@@ -166,7 +208,6 @@ export function ChatView(p: Props) {
     };
   }, [viewport, ticks, page]);
 
-  const slotActions = chatActions(chat, p.toast, page?.messages).filter((a) => a.slot).sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
 
   const loadAll = async () => {
     setLoadingAll(true);
@@ -177,6 +218,12 @@ export function ChatView(p: Props) {
     }
   };
 
+  const needsAll = searchOpen && !!query && !!page && page.start > 0;
+  useEffect(() => {
+    if (needsAll && !loadingAll) void loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsAll]);
+
   const step = Math.max(1, Math.ceil(ticks.length / 60));
   const sampled = ticks.filter((_, k) => k % step === 0 || k === activeTick);
 
@@ -185,7 +232,8 @@ export function ChatView(p: Props) {
       {!page ? (
         <HeaderSkeleton />
       ) : (
-        <header className="space-y-3 border-b px-4 py-3">
+        <header className="border-b py-3">
+          <div className="w-full space-y-3 px-4">
           <div className="flex items-center gap-3">
             <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted">
               <ProviderLogo provider={chat.provider} className="size-6" />
@@ -199,12 +247,22 @@ export function ChatView(p: Props) {
                   </Button>
                 </Tip>
               </div>
-              <p className="truncate text-xs text-muted-foreground">
-                {[PROVIDER_NAME[chat.provider], accountLabel(chat.account), chat.project, chat.model, chat.backup ? "Backup copy" : null].filter(Boolean).join(" · ")}
-              </p>
-              <p className="truncate text-xs text-muted-foreground">
-                {fmtDate(chat.lastMs)} · {fmtSize(chat.size)} · {page.total.toLocaleString()} messages
-              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-1">
+                {[
+                  chat.model ? { icon: Cpu, label: chat.model } : null,
+                  chat.backup ? { icon: Archive, label: "Backup copy" } : null,
+                  { icon: Clock, label: fmtDate(chat.lastMs) },
+                  { icon: HardDrive, label: fmtSize(chat.size) },
+                  { icon: MessageSquare, label: `${page.total.toLocaleString()} messages` },
+                ]
+                  .filter((m): m is { icon: typeof Cpu; label: string } => m !== null)
+                  .map((m) => (
+                    <Badge key={m.label} variant="secondary" className="h-5 gap-1 rounded-md px-1.5 text-[11px] font-normal text-muted-foreground">
+                      <m.icon className="size-3" strokeWidth={1.5} />
+                      {m.label}
+                    </Badge>
+                  ))}
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-1">
               <Tip label={p.pinned ? "Unpin this chat" : "Pin this chat to the top of the list"}>
@@ -231,15 +289,11 @@ export function ChatView(p: Props) {
                 </Toggle>
               </Tip>
             </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} />
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {slotActions.map((a) => (
-              <Tip key={a.id} label={a.hint}>
-                <RunButton action={a} primary={a.slot === 1} onError={p.toast} />
-              </Tip>
-            ))}
-            <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} />
           </div>
         </header>
       )}
@@ -259,7 +313,7 @@ export function ChatView(p: Props) {
                   if (e.key === "Enter" && matches.length) setCur((c) => (e.shiftKey ? (c - 1 + matches.length) % matches.length : (c + 1) % matches.length));
                 }}
               />
-              <span className="shrink-0 px-1 text-xs tabular-nums text-muted-foreground">{query ? (matches.length ? `${matchIndex + 1}/${matches.length}` : "0/0") : ""}</span>
+              <span className="shrink-0 px-1 text-xs tabular-nums text-muted-foreground">{query ? (loadingAll ? "…" : matches.length ? `${matchIndex + 1}/${matches.length}` : "0/0") : ""}</span>
               <Button variant="ghost" size="icon" className="size-7" aria-label="Previous match" disabled={!matches.length} onClick={() => setCur((c) => (c - 1 + matches.length) % matches.length)}>
                 <ChevronUp className="size-4" />
               </Button>
@@ -270,14 +324,6 @@ export function ChatView(p: Props) {
                 <X className="size-4" />
               </Button>
             </div>
-            {page.start > 0 && (
-              <p className="px-2 pb-1 pt-0.5 text-xs text-muted-foreground">
-                Searching the latest {page.messages.length.toLocaleString()} messages.{" "}
-                <button className="underline disabled:opacity-60" disabled={loadingAll} onClick={loadAll}>
-                  {loadingAll ? "Loading…" : "Load all"}
-                </button>
-              </p>
-            )}
           </div>
         )}
 
@@ -285,7 +331,7 @@ export function ChatView(p: Props) {
           {!page ? (
             <MessagesSkeleton />
           ) : (
-            <div className="mx-auto max-w-3xl space-y-7 p-4 pl-12">
+            <div className="mx-auto max-w-3xl space-y-7 px-4 pb-24 pt-4">
               {page.start > 0 && (
                 <div className="flex justify-center">
                   <Button size="sm" variant="outline" onClick={p.onLoadEarlier} disabled={p.loadingEarlier}>
@@ -320,16 +366,24 @@ export function ChatView(p: Props) {
         {page && sampled.length >= 3 && (
           <ConversationBar
             ticks={sampled.map((t) => ({ i: t.i, text: t.m.text, ts: t.m.ts, active: ticks.indexOf(t) === activeTick }))}
-            onPick={(i) => els.current[i]?.scrollIntoView({ block: "start", behavior: "smooth" })}
+            onPick={(i) => goTo(els.current[i], "start")}
           />
         )}
+
+        <div className={cn("pointer-events-none absolute inset-x-0 top-0 z-10 h-12 bg-gradient-to-b from-background via-background/70 to-transparent transition-opacity duration-200", atTop ? "opacity-0" : "opacity-100")} />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-20 bg-gradient-to-t from-background via-background/70 to-transparent" />
 
         {showJump && (
           <Button
             size="icon"
             aria-label="Scroll to the bottom"
-            className="absolute bottom-4 left-1/2 size-9 -translate-x-1/2 rounded-full shadow-md"
-            onClick={() => viewport()?.scrollTo({ top: viewport()!.scrollHeight, behavior: "smooth" })}
+            className="absolute bottom-4 left-1/2 z-20 size-9 -translate-x-1/2 rounded-full shadow-md"
+            onClick={() => {
+              const el = viewport();
+              if (!el) return;
+              if (lenisRef.current) lenisRef.current.scrollTo(el.scrollHeight, { duration: 1.2 });
+              else el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            }}
           >
             <ArrowDown className="size-4" />
           </Button>
@@ -339,37 +393,13 @@ export function ChatView(p: Props) {
   );
 }
 
-function RunButton({ action, primary, onError }: { action: ChatAction; primary?: boolean; onError: (m: string) => void }) {
-  const [busy, setBusy] = useState(false);
-  const Icon = action.icon;
-  return (
-    <Button
-      size="sm"
-      variant={primary ? "default" : "outline"}
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          await action.run();
-        } catch (e) {
-          onError(String(e));
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      {busy ? <Loader2 className="size-4 animate-spin" /> : <Icon className="size-4" />} {action.label}
-    </Button>
-  );
-}
-
 function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void }) {
-  const actions = chatActions(chat, toast, msgs).filter((a) => !a.slot);
+  const actions = chatActions(chat, toast, msgs);
   const groups = ["Continue", "Open", "Copy", "Save"] as const;
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger render={<Button size="sm" variant="outline" />}>
-        <MoreHorizontal className="size-4" /> Actions <ChevronDown className="size-3.5 text-muted-foreground" />
+      <DropdownMenuTrigger render={<Button size="sm" />}>
+        Actions <ChevronDown className="size-3.5 opacity-70" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-60">
         <DropdownMenuGroup>
@@ -417,7 +447,7 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
 /** A run of tool steps, collapsed to one line with the shadcn Trace. */
 function StepsTrace({ items, q }: { items: { i: number; m: Item }[]; q: string }) {
   const [open, setOpen] = useState(false);
-  const hasMatch = !!q && items.some((t) => t.m.text.toLowerCase().includes(q.toLowerCase()));
+  const hasMatch = !!q && items.some((t) => textHas(t.m.text, q));
   const names = Array.from(new Set(items.map((t) => stepName(t.m))));
   return (
     <Trace className="pl-11">
@@ -506,7 +536,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
             </MiniAction>
           </div>
         </MessageHeader>
-        <Bubble variant={isUser ? "secondary" : "outline"} className={cn("max-w-full", isCurrentMatch && "*:data-[slot=bubble-content]:ring-2 *:data-[slot=bubble-content]:ring-primary/60")}>
+        <Bubble variant={isUser ? "secondary" : "outline"} className="max-w-full">
           <BubbleContent className="overflow-visible">
             {m.kind === "image" ? <span className="text-muted-foreground">[Image]</span> : <MessageBody text={text} q={q} active={isCurrentMatch} assistant={!isUser} />}
             {long && !q && (
@@ -533,69 +563,66 @@ function MiniAction({ label, onClick, children }: { label: string; onClick: () =
 
 type BarTick = { i: number; text: string; ts: string; active: boolean };
 
+const PITCH = 8; // height of one tick row, in px
+const PAD = 12; // top padding of the bar, in px
+
 /**
- * The strip of ticks beside the chat. Ticks swell like a wave around the pointer, and the
- * closest one shows a preview of that question.
+ * The strip of ticks beside the chat. Ticks swell like a wave around the pointer and the closest one
+ * turns dark and previews that question. The pointer position is turned into a tick index with plain
+ * arithmetic and animated with transforms, so nothing is measured while you move.
  */
 function ConversationBar({ ticks, onPick }: { ticks: BarTick[]; onPick: (i: number) => void }) {
   const navRef = useRef<HTMLElement | null>(null);
-  const tickRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const [y, setY] = useState<number | null>(null);
+  const topRef = useRef(0);
+  const frame = useRef(0);
+  // Fractional tick position under the pointer, or null when it is away.
+  const [pos, setPos] = useState<number | null>(null);
 
-  // Distance from the pointer to every tick, measured when the pointer moves.
-  const navTop = navRef.current?.getBoundingClientRect().top ?? 0;
-  const centers = ticks.map((_, idx) => {
-    const r = tickRefs.current[idx]?.getBoundingClientRect();
-    return r ? r.top + r.height / 2 : null;
-  });
-  let nearest = -1;
-  let best = Infinity;
-  if (y !== null) {
-    centers.forEach((c, idx) => {
-      if (c === null) return;
-      const d = Math.abs(y - c);
-      if (d < best) {
-        best = d;
-        nearest = idx;
-      }
-    });
-  }
+  const onMove = (e: React.MouseEvent) => {
+    const y = e.clientY;
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => setPos((y - topRef.current - PAD) / PITCH - 0.5));
+  };
+  const nearest = pos === null ? -1 : Math.min(ticks.length - 1, Math.max(0, Math.round(pos)));
   const near = ticks[nearest];
   const head = near?.text.trim().split("\n")[0] ?? "";
+
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
 
   return (
     <nav
       ref={navRef}
       aria-label="Conversation"
-      className="absolute left-0 top-1/2 z-10 flex max-h-[70%] -translate-y-1/2 flex-col gap-1.5 py-3 pl-3 pr-5"
-      onMouseMove={(e) => setY(e.clientY)}
-      onMouseLeave={() => setY(null)}
+      className="absolute left-0 top-1/2 z-10 flex max-h-[80%] -translate-y-1/2 cursor-pointer flex-col pl-3 pr-5"
+      style={{ paddingTop: PAD, paddingBottom: PAD }}
+      onMouseEnter={(e) => {
+        topRef.current = e.currentTarget.getBoundingClientRect().top;
+      }}
+      onMouseMove={onMove}
+      onMouseLeave={() => {
+        cancelAnimationFrame(frame.current);
+        setPos(null);
+      }}
+      onClick={() => near && onPick(near.i)}
     >
       {ticks.map((t, idx) => {
-        const c = centers[idx];
-        const d = y !== null && c !== null ? Math.abs(y - c) : Infinity;
-        const f = Math.exp(-Math.pow(d / 36, 2));
-        const width = (t.active ? 20 : 10) + 22 * f;
+        // A smooth bump centred on the pointer, about two ticks wide.
+        const f = pos === null ? 0 : Math.exp(-Math.pow(idx - pos, 2) / 5);
+        const hot = pos !== null ? idx === nearest : t.active;
+        const scale = ((hot ? 22 : 10) + 22 * f) / 44;
         return (
-          <div
-            key={t.i}
-            ref={(el) => {
-              tickRefs.current[idx] = el;
-            }}
-            className="flex h-2 cursor-pointer items-center"
-            onClick={() => onPick(t.i)}
-          >
+          <div key={t.i} className="flex items-center" style={{ height: PITCH }}>
             <div
-              className={cn("rounded-full transition-[width,opacity,height] duration-100 ease-out", t.active ? "bg-foreground" : "bg-muted-foreground")}
-              style={{ width, height: t.active ? 2 : 1 + 0.5 * f, opacity: t.active ? 1 : 0.35 + 0.3 * f }}
+              className={cn("w-11 origin-left rounded-full transition-[transform,opacity,background-color] duration-100 ease-out will-change-transform", hot ? "bg-foreground" : "bg-muted-foreground")}
+              style={{ height: hot ? 2.5 : f > 0.5 ? 2 : 1.5, transform: `scaleX(${scale})`, opacity: hot ? 1 : 0.5 + 0.35 * f }}
             />
           </div>
         );
       })}
-      {near && y !== null && centers[nearest] !== null && (
+      {near && pos !== null && (
         <div
           className="pointer-events-none absolute left-full z-20 ml-1 w-72 rounded-xl border bg-popover p-3 text-popover-foreground shadow-md"
-          style={{ top: (centers[nearest] as number) - navTop, transform: "translateY(-50%)" }}
+          style={{ top: PAD + nearest * PITCH + PITCH / 2, transform: "translateY(-50%)" }}
         >
           <p className="line-clamp-2 text-xs font-medium">{head}</p>
           <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{near.text.trim().slice(head.length).trim() || (near.ts ? fmtDate(Date.parse(near.ts)) : "")}</p>

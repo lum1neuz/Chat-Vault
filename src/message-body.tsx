@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { CodeBlock, CodeBlockActions, CodeBlockContent, CodeBlockCopyButton, CodeBlockHeader, CodeBlockLine, CodeBlockTitle } from "@/components/ui/code-block";
 import { useHighlightedCode } from "@/hooks/use-highlighted-code";
-import { Linkified, SourcesTrace, STACK_RE, StackTrace, uniqueUrls } from "@/ai-elements";
+import { SourcesTrace, STACK_RE, StackTrace, uniqueUrls } from "@/ai-elements";
+import { Markdown } from "@/markdown";
 
 export { Highlight } from "@/highlight";
 
@@ -70,9 +71,9 @@ export function MessageBody({ text, q, active, assistant }: { text: string; q: s
         ) : p.type === "stack" ? (
           <StackTrace key={i} text={p.text} />
         ) : (
-          <p key={i} className="whitespace-pre-wrap break-words leading-relaxed">
-            <Linkified text={p.text.replace(/^\n+|\n+$/g, "")} q={q} active={active} />
-          </p>
+          <div key={i} className="min-w-0 break-words">
+            <Markdown source={p.text.replace(/^\n+|\n+$/g, "")} q={q} active={active} breaks={!assistant} />
+          </div>
         ),
       )}
       <SourcesTrace urls={urls} />

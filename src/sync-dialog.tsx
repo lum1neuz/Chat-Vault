@@ -77,14 +77,25 @@ export function SyncDialog({
             </div>
             <div className="min-w-0">
               <DialogTitle className="text-base font-medium">Sync &amp; backup</DialogTitle>
-              <DialogDescription>Keep a copy of every Claude Code and Codex chat in your Documents folder.</DialogDescription>
+              <DialogDescription>Keep a copy of your chats in Documents.</DialogDescription>
             </div>
           </div>
         </DialogHeader>
 
         <div className="space-y-3">
           <div className="rounded-lg border bg-muted/40 p-3 text-sm">
-            <Row label="Backup folder" value={status?.path || "…"} mono />
+            <Row
+              label="Backup folder"
+              value={
+                <span className="inline-flex items-start gap-1">
+                  <span>{status?.path || "…"}</span>
+                  <Button variant="ghost" size="icon" className="-my-1 size-6 shrink-0 text-muted-foreground" aria-label="Open the backup folder" title="Open the backup folder" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
+                    <FolderOpen className="size-3.5" />
+                  </Button>
+                </span>
+              }
+              mono
+            />
             <Row label="Files" value={status ? `${status.files.toLocaleString()} · ${fmtSize(status.bytes)}` : "…"} />
             <Row label="Last sync" value={status?.lastSyncMs ? fmtDate(status.lastSyncMs) : "Never"} />
           </div>
@@ -107,9 +118,6 @@ export function SyncDialog({
               {busy === "restore" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore missing
             </Button>
           </div>
-          <Button variant="ghost" size="sm" className="w-full" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
-            <FolderOpen className="size-4" /> Open backup folder
-          </Button>
 
           <div className="flex items-start justify-between gap-3 rounded-lg border p-3">
             <div className="min-w-0">
