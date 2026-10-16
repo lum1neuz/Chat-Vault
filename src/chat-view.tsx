@@ -10,8 +10,6 @@ import {
   ListTree,
   Loader2,
   MoreHorizontal,
-  PanelTopClose,
-  PanelTopOpen,
   Pencil,
   Pin,
   PinOff,
@@ -22,7 +20,6 @@ import {
   X,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -188,18 +185,26 @@ export function ChatView(p: Props) {
       {!page ? (
         <HeaderSkeleton />
       ) : (
-        <header className="border-b">
-          <div className="flex items-center gap-3 px-4 pt-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-              <ProviderLogo provider={chat.provider} className="size-5" />
+        <header className="space-y-3 border-b px-4 py-3">
+          <div className="flex items-center gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted">
+              <ProviderLogo provider={chat.provider} className="size-6" />
             </div>
-            <div className="group/title flex min-w-0 flex-1 items-center gap-1">
-              <h2 className="truncate text-base font-medium">{chat.title}</h2>
-              <Tip label="Rename this chat in ChatVault.">
-                <Button variant="ghost" size="icon" className="size-7 shrink-0 text-muted-foreground opacity-0 group-hover/title:opacity-100 focus-visible:opacity-100" aria-label="Rename" onClick={p.onRename}>
-                  <Pencil className="size-3.5" />
-                </Button>
-              </Tip>
+            <div className="min-w-0 flex-1">
+              <div className="group/title flex items-center gap-1">
+                <h2 className="truncate text-base font-medium leading-tight">{chat.title}</h2>
+                <Tip label="Rename this chat in ChatVault.">
+                  <Button variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground opacity-0 group-hover/title:opacity-100 focus-visible:opacity-100" aria-label="Rename" onClick={p.onRename}>
+                    <Pencil className="size-3.5" />
+                  </Button>
+                </Tip>
+              </div>
+              <p className="truncate text-xs text-muted-foreground">
+                {[PROVIDER_NAME[chat.provider], accountLabel(chat.account), chat.project, chat.model, chat.backup ? "Backup copy" : null].filter(Boolean).join(" · ")}
+              </p>
+              <p className="truncate text-xs text-muted-foreground">
+                {fmtDate(chat.lastMs)} · {fmtSize(chat.size)} · {page.total.toLocaleString()} messages
+              </p>
             </div>
             <div className="flex shrink-0 items-center gap-1">
               <Tip label={p.pinned ? "Unpin this chat" : "Pin this chat to the top of the list"}>
@@ -225,15 +230,10 @@ export function ChatView(p: Props) {
                   <ListTree />
                 </Toggle>
               </Tip>
-              <Tip label={p.headerOpen ? "Hide chat details" : "Show chat details"}>
-                <Toggle aria-label="Chat details" size="sm" pressed={p.headerOpen} onPressedChange={p.onToggleHeader}>
-                  {p.headerOpen ? <PanelTopClose /> : <PanelTopOpen />}
-                </Toggle>
-              </Tip>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 px-4 pt-3">
+          <div className="flex flex-wrap items-center gap-2">
             {slotActions.map((a) => (
               <Tip key={a.id} label={a.hint}>
                 <RunButton action={a} primary={a.slot === 1} onError={p.toast} />
@@ -241,64 +241,46 @@ export function ChatView(p: Props) {
             ))}
             <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} />
           </div>
-
-          {p.headerOpen && (
-            <div className="flex flex-wrap items-center gap-1.5 px-4 pt-3">
-              <Badge variant="outline" className="gap-1">
-                <ProviderLogo provider={chat.provider} className="size-3" /> {PROVIDER_NAME[chat.provider]}
-              </Badge>
-              <Badge variant="outline">{accountLabel(chat.account)}</Badge>
-              <Badge variant="outline">{chat.project}</Badge>
-              {chat.model && <Badge variant="outline">{chat.model}</Badge>}
-              {chat.backup && <Badge variant="outline">Backup copy</Badge>}
-              <span className="text-xs text-muted-foreground">
-                {fmtDate(chat.lastMs)} Â· {fmtSize(chat.size)} Â· {page.total.toLocaleString()} messages
-              </span>
-            </div>
-          )}
-
-          {searchOpen && (
-            <div className="flex items-center gap-2 px-4 pt-3">
-              <div className="relative flex-1">
-                <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-                <Input
-                  ref={searchRef}
-                  className="h-9 pl-8"
-                  placeholder="Search in this chat"
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && matches.length) setCur((c) => (e.shiftKey ? (c - 1 + matches.length) % matches.length : (c + 1) % matches.length));
-                  }}
-                />
-              </div>
-              <span className="w-20 shrink-0 text-center text-xs text-muted-foreground">
-                {query ? (matches.length ? `${matchIndex + 1} of ${matches.length}` : "No matches") : ""}
-              </span>
-              <Button variant="outline" size="icon" aria-label="Previous match" disabled={!matches.length} onClick={() => setCur((c) => (c - 1 + matches.length) % matches.length)}>
-                <ChevronUp className="size-4" />
-              </Button>
-              <Button variant="outline" size="icon" aria-label="Next match" disabled={!matches.length} onClick={() => setCur((c) => (c + 1) % matches.length)}>
-                <ChevronDown className="size-4" />
-              </Button>
-              <Button variant="ghost" size="icon" aria-label="Close search" onClick={() => setSearchOpen(false)}>
-                <X className="size-4" />
-              </Button>
-            </div>
-          )}
-          {searchOpen && page.start > 0 && (
-            <div className="flex items-center gap-2 px-4 pt-2 text-xs text-muted-foreground">
-              Searching the latest {page.messages.length.toLocaleString()} messages.
-              <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={loadingAll} onClick={loadAll}>
-                {loadingAll ? "Loadingâ€¦" : `Load all ${page.total.toLocaleString()} messages`}
-              </Button>
-            </div>
-          )}
-          <div className="h-3" />
         </header>
       )}
 
       <div ref={wrapRef} className="relative min-h-0 flex-1">
+        {page && searchOpen && (
+          <div className="absolute right-6 top-3 z-20 w-[min(26rem,calc(100%-3rem))] rounded-xl border bg-popover p-1.5 text-popover-foreground shadow-lg">
+            <div className="flex items-center gap-1">
+              <Search className="ml-2 size-4 shrink-0 text-muted-foreground" />
+              <Input
+                ref={searchRef}
+                className="h-8 border-0 bg-transparent px-2 shadow-none focus-visible:ring-0"
+                placeholder="Find in this chat"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && matches.length) setCur((c) => (e.shiftKey ? (c - 1 + matches.length) % matches.length : (c + 1) % matches.length));
+                }}
+              />
+              <span className="shrink-0 px-1 text-xs tabular-nums text-muted-foreground">{query ? (matches.length ? `${matchIndex + 1}/${matches.length}` : "0/0") : ""}</span>
+              <Button variant="ghost" size="icon" className="size-7" aria-label="Previous match" disabled={!matches.length} onClick={() => setCur((c) => (c - 1 + matches.length) % matches.length)}>
+                <ChevronUp className="size-4" />
+              </Button>
+              <Button variant="ghost" size="icon" className="size-7" aria-label="Next match" disabled={!matches.length} onClick={() => setCur((c) => (c + 1) % matches.length)}>
+                <ChevronDown className="size-4" />
+              </Button>
+              <Button variant="ghost" size="icon" className="size-7" aria-label="Close search" onClick={() => setSearchOpen(false)}>
+                <X className="size-4" />
+              </Button>
+            </div>
+            {page.start > 0 && (
+              <p className="px-2 pb-1 pt-0.5 text-xs text-muted-foreground">
+                Searching the latest {page.messages.length.toLocaleString()} messages.{" "}
+                <button className="underline disabled:opacity-60" disabled={loadingAll} onClick={loadAll}>
+                  {loadingAll ? "Loading…" : "Load all"}
+                </button>
+              </p>
+            )}
+          </div>
+        )}
+
         <ScrollArea className="h-full">
           {!page ? (
             <MessagesSkeleton />
@@ -484,7 +466,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
 
   const long = m.text.length > 1800;
   const expanded = open || !!q;
-  const text = long && !expanded ? m.text.slice(0, 1800) + "â€¦" : m.text;
+  const text = long && !expanded ? m.text.slice(0, 1800) + "…" : m.text;
   const copy = async (what: string, value: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -512,7 +494,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
             <MiniAction label={copied === "text" ? "Copied" : "Copy message"} onClick={() => copy("text", m.text)}>
               {copied === "text" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             </MiniAction>
-            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** Â· ${time}\n\n${m.text}`)}>
+            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** · ${time}\n\n${m.text}`)}>
               {copied === "md" ? <Check className="size-3.5" /> : <FileText className="size-3.5" />}
             </MiniAction>
             <MiniAction label={copied === "quote" ? "Copied" : "Copy as quote"} onClick={() => copy("quote", m.text.split("\n").map((l) => `> ${l}`).join("\n"))}>

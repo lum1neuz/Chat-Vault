@@ -38,7 +38,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
-import { accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { PROVIDER_NAME, accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { ChatView } from "@/chat-view";
 import { OverviewPage } from "@/overview";
 import { CommandPalette } from "@/command-palette";
@@ -489,7 +489,7 @@ export default function App() {
         {/* Content */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-            <p className="min-w-0 flex-1 truncate text-sm font-medium">{selected ? named(selected).title : "Overview"}</p>
+            <p className="min-w-0 flex-1 truncate text-sm font-medium">{selected ? `${PROVIDER_NAME[selected.provider]} / ${selected.project}` : "Overview"}</p>
             <Tip label="Search chats and actions (Ctrl+K)">
               <Button variant="outline" size="sm" className="text-muted-foreground" onClick={() => setPaletteOpen(true)}>
                 <Search className="size-4" /> Search
