@@ -422,7 +422,7 @@ export default function App() {
           <Separator />
 
           <ScrollArea className="min-h-0 flex-1">
-            <div className="p-1.5">
+            <div className="p-1.5 pr-3.5">
               {pinnedShown.length > 0 && (
                 <Section title="Pinned" count={pinnedShown.length} open={pinnedOpen} onOpenChange={setPinnedOpen}>
                   {pinnedShown.map(row)}
