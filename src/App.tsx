@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, t
 import { invoke } from "@tauri-apps/api/core";
 import {
   Archive,
+  Bot,
+  Clock,
+  FileDown,
+  Users,
   ArrowDown,
   ChevronDown,
   ChevronRight,
@@ -161,12 +165,6 @@ export default function App() {
                 {chats ? `${chats.length} chats found on this PC` : "Scanning…"}
               </p>
             </div>
-            <Button variant="ghost" size="icon" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
-              {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-            </Button>
-            <Button variant="ghost" size="icon" onClick={load} aria-label="Refresh">
-              <RefreshCw className="size-4" />
-            </Button>
           </div>
 
           <div className="space-y-2 px-3 pb-3">
@@ -213,7 +211,7 @@ export default function App() {
           <Separator />
 
           <ScrollArea className="min-h-0 flex-1">
-            <div className="space-y-1 p-2">
+            <div className="space-y-0.5 p-1.5">
               {error && <p className="p-3 text-sm text-destructive">{error}</p>}
               {!chats && !error && Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}
               {chats && visible.length === 0 && (
@@ -231,7 +229,7 @@ export default function App() {
                   onClick={() => open(c)}
                   onKeyDown={(e) => e.key === "Enter" && open(c)}
                   className={cn(
-                    "group w-full cursor-pointer rounded-lg border border-transparent p-2.5 text-left transition hover:bg-muted",
+                    "group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted",
                     selected?.id === c.id && "border-border bg-muted",
                   )}
                 >
@@ -240,7 +238,7 @@ export default function App() {
                     {c.archived && <Archive className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}
                     <ChatMenu chat={c} toast={toast.show} msgs={selected?.id === c.id ? msgs : null} />
                   </div>
-                  <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <span className="truncate">{c.project}</span>
                     <span>·</span>
                     <span className="shrink-0">{fmtDate(c.lastMs)}</span>
@@ -249,7 +247,7 @@ export default function App() {
                 </div>
               ))}
               {visible.length > limit && (
-                <div ref={sentinelRef} className="space-y-1">
+                <div ref={sentinelRef} className="space-y-0.5">
                   {Array.from({ length: 3 }).map((_, i) => (
                     <Skeleton key={i} className="h-16 w-full" />
                   ))}
@@ -261,13 +259,62 @@ export default function App() {
 
         {/* Viewer */}
         <main className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+            <p className="min-w-0 flex-1 truncate text-sm font-medium">{selected ? selected.title : "All chats"}</p>
+            <Tip label="Scan this PC for chats again.">
+              <Button variant="ghost" size="icon" onClick={load} aria-label="Refresh">
+                <RefreshCw className="size-4" />
+              </Button>
+            </Tip>
+            <Tip label={dark ? "Switch to light theme" : "Switch to dark theme"}>
+              <Button variant="ghost" size="icon" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
+                {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+              </Button>
+            </Tip>
+          </div>
           {!selected ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-              <MessagesSquare className="size-10 text-muted-foreground" strokeWidth={1.25} />
-              <p className="text-base font-medium">Pick a chat to read it</p>
-              <p className="max-w-sm text-sm text-muted-foreground">
-                Chats from every Claude account used on this computer are listed on the left.
-              </p>
+            <div className="flex flex-1 items-center justify-center overflow-auto p-6">
+              <div className="w-full max-w-xl space-y-6 text-center">
+                <div className="mx-auto flex size-12 items-center justify-center rounded-xl bg-muted">
+                  <MessagesSquare className="size-6 text-muted-foreground" strokeWidth={1.25} />
+                </div>
+                <div className="space-y-1">
+                  <h2 className="text-base font-medium">Pick a chat to read it</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Chats from every Claude account used on this computer are listed on the left.
+                  </p>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-left">
+                  {[
+                    { icon: MessagesSquare, n: chats?.length ?? "…", label: "Chats found" },
+                    { icon: Users, n: accounts.length || "…", label: "Accounts" },
+                    { icon: Clock, n: chats?.[0] ? fmtDate(chats[0].lastMs) : "…", label: "Latest activity" },
+                  ].map((s) => (
+                    <div key={s.label} className="rounded-lg border bg-card p-3">
+                      <s.icon className="mb-2 size-4 text-muted-foreground" strokeWidth={1.5} />
+                      <p className="truncate text-sm font-medium">{s.n}</p>
+                      <p className="text-xs text-muted-foreground">{s.label}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="space-y-2 text-left">
+                  {[
+                    { icon: Search, title: "Search inside chats", text: "Type a word and press Enter to search the full text of every chat." },
+                    { icon: Bot, title: "Continue anywhere", text: "Use the three dots on a chat to continue it in Claude Code or Codex." },
+                    { icon: FileDown, title: "Keep a copy", text: "Save any chat as a Markdown file or a handoff file." },
+                  ].map((s) => (
+                    <div key={s.title} className="flex items-start gap-3 rounded-lg border p-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                        <s.icon className="size-4 text-muted-foreground" strokeWidth={1.5} />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{s.title}</p>
+                        <p className="text-xs text-muted-foreground">{s.text}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           ) : (
             <>
@@ -415,6 +462,16 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const actions = chatActions(chat, toast, msgs);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
   const groups = ["Continue", "Open", "Copy", "Save"] as const;
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -424,7 +481,7 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
             variant="ghost"
             size="icon"
             aria-label="Chat actions"
-            className="size-7 shrink-0 text-muted-foreground"
+            className="-my-1 size-7 shrink-0 text-muted-foreground"
             onClick={(e) => e.stopPropagation()}
           />
         }
