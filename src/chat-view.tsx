@@ -45,6 +45,7 @@ import { ProviderLogo } from "@/claude-logo";
 import { Highlight, MessageBody } from "@/message-body";
 import { PROVIDER_NAME, accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { HeaderSkeleton, MessagesSkeleton } from "@/skeletons";
+import { PlanBlock, StepItem, SubagentBlock, isAgent, isPlan, mergeResults, stepName, type Item } from "@/steps";
 
 type Props = {
   chat: Chat;
@@ -72,7 +73,7 @@ function Tip({ label, children }: { label: string; children: ReactElement }) {
   );
 }
 
-type Block = { kind: "msg"; i: number; m: Msg } | { kind: "trace"; i: number; items: { i: number; m: Msg }[] };
+type Block = { kind: "msg"; i: number; m: Item } | { kind: "plan"; i: number; m: Item } | { kind: "agent"; i: number; m: Item } | { kind: "trace"; i: number; items: { i: number; m: Item }[] };
 
 export function ChatView(p: Props) {
   const { chat, page } = p;
@@ -86,14 +87,17 @@ export function ChatView(p: Props) {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const els = useRef<Record<number, HTMLElement | null>>({});
 
-  const shown = useMemo(() => (page ? page.messages.filter((m) => p.showSteps || m.kind !== "tool") : []), [page, p.showSteps]);
+  const merged = useMemo(() => (page ? mergeResults(page.messages) : []), [page]);
+  const shown = useMemo(() => merged.filter((m) => p.showSteps || (m.kind !== "tool" && m.kind !== "reasoning")), [merged, p.showSteps]);
   const viewport = useCallback(() => wrapRef.current?.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]") ?? null, []);
 
   // Consecutive tool steps collapse into one Trace.
   const blocks = useMemo(() => {
     const out: Block[] = [];
     shown.forEach((m, i) => {
-      if (m.kind === "tool") {
+      if (isPlan(m)) out.push({ kind: "plan", i, m });
+      else if (isAgent(m)) out.push({ kind: "agent", i, m });
+      else if (m.kind === "tool" || m.kind === "reasoning") {
         const last = out[out.length - 1];
         if (last && last.kind === "trace") last.items.push({ i, m });
         else out.push({ kind: "trace", i, items: [{ i, m }] });
@@ -309,7 +313,15 @@ export function ChatView(p: Props) {
                 </div>
               )}
               {blocks.map((b) =>
-                b.kind === "trace" ? (
+                b.kind === "plan" ? (
+                  <div key={`${page.start}-p${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
+                    <PlanBlock item={b.m} />
+                  </div>
+                ) : b.kind === "agent" ? (
+                  <div key={`${page.start}-a${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
+                    <SubagentBlock item={b.m} />
+                  </div>
+                ) : b.kind === "trace" ? (
                   <div key={`${page.start}-t${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
                     <StepsTrace items={b.items} q={query} />
                   </div>
@@ -417,14 +429,10 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
 }
 
 /** A run of tool steps, collapsed to one line with the shadcn Trace. */
-function StepsTrace({ items, q }: { items: { i: number; m: Msg }[]; q: string }) {
+function StepsTrace({ items, q }: { items: { i: number; m: Item }[]; q: string }) {
   const [open, setOpen] = useState(false);
   const hasMatch = !!q && items.some((t) => t.m.text.toLowerCase().includes(q.toLowerCase()));
-  const split = (text: string) => {
-    const k = text.indexOf(": ");
-    return k > 0 ? [text.slice(0, k), text.slice(k + 2)] : [text, ""];
-  };
-  const names = Array.from(new Set(items.map((t) => split(t.m.text)[0])));
+  const names = Array.from(new Set(items.map((t) => stepName(t.m))));
   return (
     <Trace className="pl-11">
       <TraceCollapsible open={open || hasMatch} onOpenChange={setOpen}>
@@ -441,23 +449,9 @@ function StepsTrace({ items, q }: { items: { i: number; m: Msg }[]; q: string })
         </TraceCollapsibleTrigger>
         <TraceCollapsibleContent>
           <div className="space-y-1.5">
-            {items.map(({ i, m }) => {
-              const [name, detail] = split(m.text);
-              return (
-                <Trace key={i}>
-                  <TraceLine>
-                    <TraceTitle className="font-medium text-foreground/80">
-                      <Highlight text={name} q={q} activeMark={false} />
-                    </TraceTitle>
-                    {detail && (
-                      <TraceDescription className="truncate font-mono text-xs">
-                        <Highlight text={detail} q={q} activeMark={false} />
-                      </TraceDescription>
-                    )}
-                  </TraceLine>
-                </Trace>
-              );
-            })}
+            {items.map(({ i, m }) => (
+              <StepItem key={i} item={m} q={q} />
+            ))}
           </div>
         </TraceCollapsibleContent>
       </TraceCollapsible>
@@ -528,7 +522,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
         </MessageHeader>
         <Bubble variant={isUser ? "secondary" : "outline"} className={cn("max-w-full", isCurrentMatch && "*:data-[slot=bubble-content]:ring-2 *:data-[slot=bubble-content]:ring-primary/60")}>
           <BubbleContent className="overflow-visible">
-            {m.kind === "image" ? <span className="text-muted-foreground">[Image]</span> : <MessageBody text={text} q={q} active={isCurrentMatch} />}
+            {m.kind === "image" ? <span className="text-muted-foreground">[Image]</span> : <MessageBody text={text} q={q} active={isCurrentMatch} assistant={!isUser} />}
             {long && !q && (
               <button className="mt-1 text-xs text-muted-foreground underline" onClick={() => setOpen((o) => !o)}>
                 {open ? "Show less" : "Show all"}

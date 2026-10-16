@@ -37,7 +37,11 @@ export type Msg = {
   role: "user" | "assistant";
   ts: string;
   text: string;
-  kind: "text" | "tool" | "summary" | "image";
+  kind: "text" | "tool" | "summary" | "image" | "result" | "reasoning";
+  id?: string;
+  name?: string;
+  data?: Record<string, unknown>;
+  error?: boolean;
 };
 export type MsgPage = { messages: Msg[]; total: number; start: number };
 
@@ -84,7 +88,7 @@ export function toMarkdown(chat: Chat, msgs: Msg[]) {
     "",
   ];
   for (const m of msgs) {
-    if (m.kind === "tool") continue;
+    if (m.kind !== "text" && m.kind !== "summary") continue;
     lines.push(`## ${m.role === "user" ? "You" : who} · ${m.ts ? fmtDate(Date.parse(m.ts)) : ""}`, "", m.text, "");
   }
   return lines.join("\n");

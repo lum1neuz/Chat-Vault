@@ -1,14 +1,32 @@
 //! Parsers that turn one transcript line into displayable messages, for Claude Code and Codex.
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Serialize, Clone)]
 pub struct Msg {
     pub role: String,
     pub ts: String,
     pub text: String,
+    /// text | summary | image | tool | result | reasoning
     pub kind: String,
+    /// Tool call id, so a result can be matched to its call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Tool name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Structured tool input, kept only for the tools the viewer renders specially.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<bool>,
+}
+
+impl Msg {
+    fn new(role: &str, ts: &str, text: String, kind: &str) -> Msg {
+        Msg { role: role.into(), ts: ts.into(), text, kind: kind.into(), id: None, name: None, data: None, error: None }
+    }
 }
 
 pub fn clip(s: &str, n: usize) -> String {
@@ -63,6 +81,24 @@ fn first_detail(inp: &Value, keys: &[&str]) -> String {
         .to_string()
 }
 
+/// Tools whose input the viewer draws as a terminal, plan, agent or source list.
+fn keeps_data(name: &str) -> bool {
+    matches!(
+        name,
+        "Bash" | "TodoWrite" | "Task" | "Agent" | "WebFetch" | "WebSearch" | "update_plan" | "exec_command" | "shell" | "local_shell" | "shell_command"
+    )
+}
+
+/// Long strings inside tool input are shortened so a chat page stays small.
+fn trim_value(v: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(clip(s, 3000)),
+        Value::Array(a) => Value::Array(a.iter().take(60).map(trim_value).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), trim_value(x))).collect()),
+        other => other.clone(),
+    }
+}
+
 /// One Claude Code transcript line.
 pub fn claude_messages(v: &Value) -> Vec<Msg> {
     let mut out = Vec::new();
@@ -80,12 +116,8 @@ pub fn claude_messages(v: &Value) -> Vec<Msg> {
         if t.trim().is_empty() || (role == "user" && claude_noise(t)) {
             return;
         }
-        let kind = if role == "user" && t.starts_with("This session is being continued") {
-            "summary"
-        } else {
-            "text"
-        };
-        out.push(Msg { role: role.clone(), ts: ts.clone(), text: t.to_string(), kind: kind.into() });
+        let kind = if role == "user" && t.starts_with("This session is being continued") { "summary" } else { "text" };
+        out.push(Msg::new(&role, &ts, t.to_string(), kind));
     };
     match content {
         Value::String(s) => push_text(&mut out, s),
@@ -97,24 +129,41 @@ pub fn claude_messages(v: &Value) -> Vec<Msg> {
                             push_text(&mut out, t);
                         }
                     }
-                    "image" => out.push(Msg {
-                        role: role.clone(),
-                        ts: ts.clone(),
-                        text: "[Image]".into(),
-                        kind: "image".into(),
-                    }),
+                    "thinking" => {
+                        let t = b.get("thinking").and_then(|x| x.as_str()).unwrap_or("");
+                        if !t.trim().is_empty() {
+                            out.push(Msg::new(&role, &ts, clip(t, 6000), "reasoning"));
+                        }
+                    }
+                    "image" => out.push(Msg::new(&role, &ts, "[Image]".into(), "image")),
                     "tool_use" => {
                         let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
-                        let detail = b
-                            .get("input")
+                        let input = b.get("input");
+                        let detail = input
                             .map(|i| first_detail(i, &["description", "command", "file_path", "pattern", "url", "query", "prompt"]))
                             .unwrap_or_default();
-                        out.push(Msg {
-                            role: role.clone(),
-                            ts: ts.clone(),
-                            text: format!("{}: {}", name, clip(&detail, 160)),
-                            kind: "tool".into(),
-                        });
+                        let mut m = Msg::new(&role, &ts, format!("{}: {}", name, clip(&detail, 160)), "tool");
+                        m.id = b.get("id").and_then(|x| x.as_str()).map(String::from);
+                        m.name = Some(name.to_string());
+                        if keeps_data(name) {
+                            m.data = input.map(trim_value);
+                        }
+                        out.push(m);
+                    }
+                    "tool_result" => {
+                        let body = match b.get("content") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(Value::Array(a)) => a
+                                .iter()
+                                .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            _ => String::new(),
+                        };
+                        let mut m = Msg::new(&role, &ts, clip(&body, 3000), "result");
+                        m.id = b.get("tool_use_id").and_then(|x| x.as_str()).map(String::from);
+                        m.error = b.get("is_error").and_then(|x| x.as_bool());
+                        out.push(m);
                     }
                     _ => {}
                 }
@@ -123,6 +172,26 @@ pub fn claude_messages(v: &Value) -> Vec<Msg> {
         _ => {}
     }
     out
+}
+
+/// Codex wraps command output as JSON with an exit code; unwrap it when it does.
+fn codex_output(raw: &str) -> (String, Option<bool>) {
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if let Some(o) = v.get("output").and_then(|x| x.as_str()) {
+            let failed = v
+                .get("metadata")
+                .and_then(|m| m.get("exit_code"))
+                .and_then(|c| c.as_i64())
+                .map(|c| c != 0);
+            return (clip(o, 3000), failed);
+        }
+    }
+    let failed = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("Exit code: ").or_else(|| l.strip_prefix("Process exited with code ")))
+        .and_then(|c| c.trim().parse::<i64>().ok())
+        .map(|c| c != 0);
+    (clip(raw, 3000), failed)
 }
 
 /// One Codex rollout line.
@@ -147,40 +216,55 @@ pub fn codex_messages(v: &Value) -> Vec<Msg> {
                         if t.trim().is_empty() || (role == "user" && codex_noise(t)) {
                             continue;
                         }
-                        out.push(Msg { role: role.into(), ts: ts.clone(), text: t.to_string(), kind: "text".into() });
+                        out.push(Msg::new(role, &ts, t.to_string(), "text"));
                     }
-                    "input_image" => out.push(Msg {
-                        role: role.into(),
-                        ts: ts.clone(),
-                        text: "[Image]".into(),
-                        kind: "image".into(),
-                    }),
+                    "input_image" => out.push(Msg::new(role, &ts, "[Image]".into(), "image")),
                     _ => {}
                 }
+            }
+        }
+        "reasoning" => {
+            let text = p
+                .get("summary")
+                .and_then(|s| s.as_array())
+                .map(|a| a.iter().filter_map(|x| x.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n\n"))
+                .unwrap_or_default();
+            if !text.trim().is_empty() {
+                out.push(Msg::new("assistant", &ts, clip(&text, 6000), "reasoning"));
             }
         }
         "function_call" => {
             let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
             let args = p.get("arguments").and_then(|x| x.as_str()).unwrap_or("");
-            let detail = serde_json::from_str::<Value>(args)
-                .map(|a| first_detail(&a, &["cmd", "command", "path", "query", "url"]))
-                .unwrap_or_else(|_| args.lines().next().unwrap_or("").to_string());
-            out.push(Msg {
-                role: "assistant".into(),
-                ts,
-                text: format!("{}: {}", name, clip(&detail, 160)),
-                kind: "tool".into(),
-            });
+            let parsed = serde_json::from_str::<Value>(args).ok();
+            let detail = parsed
+                .as_ref()
+                .map(|a| first_detail(a, &["cmd", "command", "path", "query", "url", "explanation"]))
+                .unwrap_or_else(|| args.lines().next().unwrap_or("").to_string());
+            let mut m = Msg::new("assistant", &ts, format!("{}: {}", name, clip(&detail, 160)), "tool");
+            m.id = p.get("call_id").and_then(|x| x.as_str()).map(String::from);
+            m.name = Some(name.to_string());
+            if keeps_data(name) {
+                m.data = parsed.as_ref().map(trim_value);
+            }
+            out.push(m);
         }
         "custom_tool_call" => {
             let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
             let input = p.get("input").and_then(|x| x.as_str()).unwrap_or("");
-            out.push(Msg {
-                role: "assistant".into(),
-                ts,
-                text: format!("{}: {}", name, clip(input.lines().next().unwrap_or(""), 160)),
-                kind: "tool".into(),
-            });
+            let mut m = Msg::new("assistant", &ts, format!("{}: {}", name, clip(input.lines().next().unwrap_or(""), 160)), "tool");
+            m.id = p.get("call_id").and_then(|x| x.as_str()).map(String::from);
+            m.name = Some(name.to_string());
+            m.data = Some(json!({ "cmd": clip(input, 3000) }));
+            out.push(m);
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let raw = p.get("output").and_then(|x| x.as_str()).unwrap_or("");
+            let (text, failed) = codex_output(raw);
+            let mut m = Msg::new("assistant", &ts, text, "result");
+            m.id = p.get("call_id").and_then(|x| x.as_str()).map(String::from);
+            m.error = failed;
+            out.push(m);
         }
         _ => {}
     }
@@ -193,4 +277,9 @@ pub fn messages_for(provider: &str, v: &Value) -> Vec<Msg> {
     } else {
         claude_messages(v)
     }
+}
+
+/// Kinds that carry readable conversation, as opposed to tool traffic.
+pub fn is_readable(m: &Msg) -> bool {
+    matches!(m.kind.as_str(), "text" | "summary" | "image")
 }

@@ -5,7 +5,7 @@ mod sync;
 
 use index::{ChatSummary, Overview, Page};
 use paths::*;
-use providers::{clip, messages_for, Msg};
+use providers::{clip, is_readable, messages_for, Msg};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -143,7 +143,7 @@ async fn read_chat_all(provider: String, path: String) -> Result<Vec<Msg>, Strin
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                out.extend(messages_for(&provider, &v).into_iter().filter(|m| m.kind != "tool").map(|m| clip_msg(m, 20_000)));
+                out.extend(messages_for(&provider, &v).into_iter().filter(is_readable).map(|m| clip_msg(m, 20_000)));
             }
         }
         Ok(out)
@@ -170,7 +170,7 @@ async fn deep_search(provider: String, query: String) -> Result<Vec<SearchHit>, 
                 }
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
                 for m in messages_for(&provider, &v) {
-                    if m.kind == "tool" {
+                    if !is_readable(&m) {
                         continue;
                     }
                     let low = m.text.to_lowercase();

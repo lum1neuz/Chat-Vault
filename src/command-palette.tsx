@@ -2,7 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command";
 import { ProviderLogo } from "@/claude-logo";
-import { fmtDate, type Chat, type Provider } from "@/chat-actions";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { type Chat, type Provider } from "@/chat-actions";
+
 
 export type PaletteAction = { id: string; label: string; icon: ReactNode; shortcut?: string; run: () => void };
 
@@ -65,17 +67,17 @@ export function CommandPalette({
 
   const item = (c: Chat) => (
     <CommandItem key={`${c.provider}:${c.id}`} value={`${c.provider}:${c.id}`} onSelect={() => select(() => onOpenChat(c))}>
-      <ProviderLogo provider={c.provider} className="size-4" />
+      <ProviderLogo provider={c.provider} className="size-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate">{titleOf(c)}</span>
-      <CommandShortcut className="shrink-0">{c.project} · {fmtDate(c.lastMs)}</CommandShortcut>
     </CommandItem>
   );
 
   return (
-    <CommandDialog open={open} onOpenChange={onOpenChange} title="Search ChatVault" description="Find a chat or run an action." className="sm:max-w-xl">
+    <CommandDialog open={open} onOpenChange={onOpenChange} title="Search ChatVault" description="Find a chat or run an action." className="top-1/2 -translate-y-1/2 sm:max-w-xl">
       <Command shouldFilter={false}>
         <CommandInput value={value} onValueChange={setValue} placeholder="Search chats and actions…" />
-        <CommandList className="max-h-[60dvh]">
+        <ScrollArea className="h-[min(420px,55dvh)]">
+        <CommandList className="max-h-none overflow-visible">
           {!loading && results.length === 0 && shownActions.length === 0 && shownPinned.length === 0 && <CommandEmpty>No results found.</CommandEmpty>}
           {shownPinned.length > 0 && (
             <CommandGroup heading={`Pinned · ${provider === "claude" ? "Claude" : "Codex"}`}>{shownPinned.map(item)}</CommandGroup>
@@ -101,6 +103,12 @@ export function CommandPalette({
             </>
           )}
         </CommandList>
+        </ScrollArea>
+        <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
+          <span><kbd className="rounded border bg-muted px-1">↑</kbd> <kbd className="rounded border bg-muted px-1">↓</kbd> to move</span>
+          <span><kbd className="rounded border bg-muted px-1">Enter</kbd> to open</span>
+          <span className="ml-auto"><kbd className="rounded border bg-muted px-1">Esc</kbd> to close</span>
+        </div>
       </Command>
     </CommandDialog>
   );

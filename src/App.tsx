@@ -397,6 +397,7 @@ export default function App() {
             </div>
             <Select value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
               <SelectTrigger className="h-9 w-full">
+                <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
