@@ -213,6 +213,36 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Moves a chat transcript to the Recycle Bin, so it can still be restored from there.
+#[tauri::command]
+async fn delete_chat(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = check_transcript(&path)?;
+        let plain = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let status = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:CHATVAULT_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')",
+            ])
+            .env("CHATVAULT_PATH", &plain)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() || Path::new(&plain).exists() {
+            return Err("The chat file could not be moved to the Recycle Bin".into());
+        }
+        index::forget(&path)?;
+        index::forget(&plain)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn open_backup_folder() -> Result<(), String> {
     let b = backup_root().ok_or("No Documents folder")?;
@@ -391,6 +421,7 @@ pub fn run() {
             reveal_in_folder,
             open_folder,
             open_backup_folder,
+            delete_chat,
             open_in_claude,
             save_markdown,
             save_handoff,

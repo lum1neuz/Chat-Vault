@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   ArrowDown,
   Check,
@@ -17,6 +17,7 @@ import {
   PinOff,
   Quote,
   Search,
+  Trash2,
   User,
   X,
 } from "lucide-react";
@@ -58,6 +59,7 @@ type Props = {
   pinned: boolean;
   onTogglePin: () => void;
   onRename: () => void;
+  onDelete: () => void;
   toast: (m: string) => void;
 };
 
@@ -233,7 +235,7 @@ export function ChatView(p: Props) {
                 <RunButton action={a} primary={a.slot === 1} onError={p.toast} />
               </Tip>
             ))}
-            <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} pinned={p.pinned} onTogglePin={p.onTogglePin} />
+            <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} />
           </div>
 
           {p.headerOpen && (
@@ -367,7 +369,7 @@ function RunButton({ action, primary, onError }: { action: ChatAction; primary?:
   );
 }
 
-function ActionsMenu({ chat, msgs, toast, onRename, pinned, onTogglePin }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; pinned: boolean; onTogglePin: () => void }) {
+function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void }) {
   const actions = chatActions(chat, toast, msgs).filter((a) => !a.slot);
   const groups = ["Continue", "Open", "Copy", "Save"] as const;
   return (
@@ -405,6 +407,10 @@ function ActionsMenu({ chat, msgs, toast, onRename, pinned, onTogglePin }: { cha
             </div>
           );
         })}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onClick={onDelete}>
+          <Trash2 className="size-4" strokeWidth={1.5} /> Delete chat
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -434,7 +440,7 @@ function StepsTrace({ items, q }: { items: { i: number; m: Msg }[]; q: string })
           </TraceLine>
         </TraceCollapsibleTrigger>
         <TraceCollapsibleContent>
-          <div className="mt-2 space-y-1.5 border-l pl-3">
+          <div className="space-y-1.5">
             {items.map(({ i, m }) => {
               const [name, detail] = split(m.text);
               return (
@@ -497,9 +503,11 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
 
   return (
     <Message align={isUser ? "end" : "start"}>
-      <MessageAvatar className="self-start ">
-        <Avatar size="sm">
-          <AvatarFallback className="bg-muted">{isUser ? <User className="size-3.5" /> : <ProviderLogo provider={provider} className="size-4" />}</AvatarFallback>
+      <MessageAvatar className="self-start bg-transparent">
+        <Avatar>
+          <AvatarFallback className={cn("overflow-hidden", isUser ? "bg-secondary text-secondary-foreground" : provider === "claude" ? "bg-muted" : "bg-transparent")}>
+            {isUser ? <User className="size-4" /> : <ProviderLogo provider={provider} className={provider === "claude" ? "size-5" : "size-full"} />}
+          </AvatarFallback>
         </Avatar>
       </MessageAvatar>
       <MessageContent>

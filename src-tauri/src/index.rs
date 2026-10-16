@@ -559,3 +559,15 @@ pub fn by_ids(provider: &str, ids: &[String]) -> Result<Vec<ChatSummary>, String
         .collect();
     Ok(v)
 }
+
+/// Drops a chat from the index after its file was removed.
+pub fn forget(path: &str) -> Result<(), String> {
+    let c = open_db()?;
+    c.execute(
+        "DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE path=?1)",
+        params![path],
+    )
+    .map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM chats WHERE path=?1", params![path]).map_err(|e| e.to_string())?;
+    Ok(())
+}

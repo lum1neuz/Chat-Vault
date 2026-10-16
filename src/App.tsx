@@ -8,6 +8,9 @@ import {
   Clock,
   DatabaseBackup,
   Eye,
+  FolderOpen,
+  Trash2,
+  ArrowUpDown,
   ListFilter,
   RotateCcw,
   FileDown,
@@ -25,6 +28,7 @@ import {
   Sun,
   Users,
 } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -41,7 +45,18 @@ import { ProviderLogo } from "@/claude-logo";
 import { accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { ChatView } from "@/chat-view";
 import { CommandPalette } from "@/command-palette";
-import { Toggle } from "@/components/ui/toggle";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { SidebarSkeleton, StatSkeleton } from "@/skeletons";
 import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
 import { chatKey, useChatMeta, usePersisted } from "@/store";
@@ -89,6 +104,8 @@ export default function App() {
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [renaming, setRenaming] = useState<Chat | null>(null);
+  const [deleting, setDeleting] = useState<Chat | null>(null);
+  const [organize, setOrganize] = usePersisted("chatvault.organize", "list");
 
   const say = useCallback((m: string) => sonner(m), []);
   useEffect(() => {
@@ -297,7 +314,7 @@ export default function App() {
   const recent = items.filter((c) => !pinSet.has(chatKey(c)));
   const msgs: Msg[] | null = page?.messages ?? null;
 
-  const extras = (c: Chat): ChatAction[] => [
+  const extras = (c: Chat): ChatAction[] => orderChat([
     { id: "view", label: "Open in ChatVault", hint: "Reads this chat here.", icon: Eye, group: "Chat", run: async () => open(c) },
     {
       id: "pin",
@@ -307,8 +324,17 @@ export default function App() {
       group: "Chat",
       run: async () => togglePin(chatKey(c)),
     },
+    {
+      id: "delete",
+      label: "Delete chat",
+      hint: "Moves the chat file to the Recycle Bin.",
+      icon: Trash2,
+      group: "Chat",
+      danger: true,
+      run: async () => setDeleting(c),
+    },
     { id: "rename", label: "Rename", hint: "Give this chat your own name. The original is not changed.", icon: Pencil, group: "Chat", run: async () => setRenaming(c) },
-  ];
+  ]);
 
   const row = (c: Chat) => (
     <ChatRow
@@ -348,9 +374,6 @@ export default function App() {
           </button>
 
           <div className="space-y-2 px-3 pb-2">
-            <Button variant={selected === null ? "secondary" : "ghost"} className="h-9 w-full justify-start gap-2" onClick={() => setSelected(null)}>
-              <LayoutDashboard className="size-4" strokeWidth={1.5} /> Overview
-            </Button>
             <Tabs value={provider} onValueChange={(v) => switchProvider(v as Provider)}>
               <TabsList className="grid w-full grid-cols-2">
                 {(["claude", "codex"] as Provider[]).map((p) => (
@@ -412,11 +435,14 @@ export default function App() {
                   <FiltersMenu
                     sort={sort}
                     scope={scope}
+                    organize={organize}
                     onSort={setSort}
                     onScope={setScope}
+                    onOrganize={setOrganize}
                     onReset={() => {
                       setSort("recent");
                       setScope("all");
+                      setOrganize("list");
                     }}
                   />
                 }
@@ -430,7 +456,18 @@ export default function App() {
                     <p className="text-xs text-muted-foreground">Try a different word or account.</p>
                   </div>
                 )}
-                {recent.map(row)}
+                {organize === "project"
+                  ? groupByProject(recent).map(([project, list]) => (
+                      <div key={project} className="pt-1">
+                        <p className="flex items-center gap-1.5 px-2.5 pb-0.5 pt-1 text-xs text-muted-foreground">
+                          <FolderOpen className="size-3.5" strokeWidth={1.5} />
+                          <span className="min-w-0 flex-1 truncate">{project}</span>
+                          <span>{list.length}</span>
+                        </p>
+                        {list.map(row)}
+                      </div>
+                    ))
+                  : recent.map(row)}
                 {hasMore && (
                   <div ref={sentinelRef}>
                     <SidebarSkeleton rows={3} />
@@ -488,6 +525,7 @@ export default function App() {
               pinned={pinSet.has(chatKey(selected))}
               onTogglePin={() => togglePin(chatKey(selected))}
               onRename={() => setRenaming(selected)}
+              onDelete={() => setDeleting(selected)}
               toast={say}
             />
           )}
@@ -513,6 +551,17 @@ export default function App() {
           ]}
         />
         <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />
+        <DeleteDialog
+          chat={deleting}
+          onClose={() => setDeleting(null)}
+          onConfirm={async (c) => {
+            await invoke("delete_chat", { path: c.path });
+            if (selected && selected.id === c.id && selected.provider === c.provider) setSelected(null);
+            setDeleting(null);
+            say("Moved to the Recycle Bin");
+            setReloadKey((n) => n + 1);
+          }}
+        />
         <RenameDialog
           chat={renaming}
           current={renaming ? (names[chatKey(renaming)] ?? "") : ""}
@@ -528,11 +577,19 @@ export default function App() {
   );
 }
 
+const groupByProject = (list: Chat[]) => {
+  const map = new Map<string, Chat[]>();
+  list.forEach((c) => map.set(c.project, [...(map.get(c.project) ?? []), c]));
+  return [...map.entries()];
+};
+
+const orderChat = (list: ChatAction[]) => [...list.filter((a) => !a.danger), ...list.filter((a) => a.danger)];
+
 function Section({ title, count, open, onOpenChange, action, children }: { title: string; count: number; open: boolean; onOpenChange: (o: boolean) => void; action?: ReactNode; children: ReactNode }) {
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
       <div className="flex items-center gap-1">
-        <CollapsibleTrigger className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground">
+        <CollapsibleTrigger className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground">
           <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
           {title}
           <span className="rounded-full bg-muted px-1.5 text-[10px] font-normal text-muted-foreground">{count.toLocaleString()}</span>
@@ -547,54 +604,73 @@ function Section({ title, count, open, onOpenChange, action, children }: { title
 const SORTS: Record<string, string> = { recent: "Most recent", oldest: "Oldest first", title: "Title A to Z", size: "Largest first" };
 const SCOPES: Record<string, string> = { all: "All", live: "On this PC", backup: "Backup only", archived: "Archived" };
 
-function FiltersMenu({ sort, scope, onSort, onScope, onReset }: { sort: string; scope: string; onSort: (s: string) => void; onScope: (s: string) => void; onReset: () => void }) {
+function FiltersMenu({ sort, scope, organize, onSort, onScope, onOrganize, onReset }: { sort: string; scope: string; organize: string; onSort: (s: string) => void; onScope: (s: string) => void; onOrganize: (s: string) => void; onReset: () => void }) {
   const applied = (sort !== "recent" ? 1 : 0) + (scope !== "all" ? 1 : 0);
   return (
-    <Popover>
+    <DropdownMenu>
       <Tooltip>
         <TooltipTrigger
           render={
-            <PopoverTrigger render={<Button variant="ghost" size="icon" aria-label="Filters" className="relative size-7 shrink-0 text-muted-foreground" />}>
+            <DropdownMenuTrigger render={<Button variant="ghost" size="icon" aria-label="Filters" className="relative size-7 shrink-0 text-muted-foreground" />}>
               <ListFilter className="size-4" />
               {applied > 0 && (
                 <span className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-primary text-[9px] text-primary-foreground">{applied}</span>
               )}
-            </PopoverTrigger>
+            </DropdownMenuTrigger>
           }
         />
         <TooltipContent>Filters</TooltipContent>
       </Tooltip>
-      <PopoverContent align="end" className="w-64 gap-3 p-3">
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Sort by</p>
-          <Select value={sort} onValueChange={(v) => v && onSort(v)} items={SORTS}>
-            <SelectTrigger className="h-9 w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
+      <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <LayoutDashboard className="size-4" strokeWidth={1.5} /> Organize sidebar
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-44">
+            <DropdownMenuRadioGroup value={organize} onValueChange={onOrganize}>
+              <DropdownMenuRadioItem value="project">
+                <FolderOpen className="size-4" strokeWidth={1.5} /> By project
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="list">
+                <ListFilter className="size-4" strokeWidth={1.5} /> In one list
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <ArrowUpDown className="size-4" strokeWidth={1.5} /> Sort chats by
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-44">
+            <DropdownMenuRadioGroup value={sort} onValueChange={onSort}>
               {Object.entries(SORTS).map(([k, label]) => (
-                <SelectItem key={k} value={k}>
+                <DropdownMenuRadioItem key={k} value={k}>
                   {label}
-                </SelectItem>
+                </DropdownMenuRadioItem>
               ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Show</p>
-          <div className="grid grid-cols-2 gap-1.5">
-            {Object.entries(SCOPES).map(([k, label]) => (
-              <Toggle key={k} variant="outline" size="sm" pressed={scope === k} onPressedChange={() => onScope(k)} className="w-full">
-                {label}
-              </Toggle>
-            ))}
-          </div>
-        </div>
-        <Button variant="outline" size="sm" disabled={applied === 0} onClick={onReset}>
-          <RotateCcw className="size-3.5" /> Reset filters
-        </Button>
-      </PopoverContent>
-    </Popover>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <Eye className="size-4" strokeWidth={1.5} /> Show
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-44">
+            <DropdownMenuRadioGroup value={scope} onValueChange={onScope}>
+              {Object.entries(SCOPES).map(([k, label]) => (
+                <DropdownMenuRadioItem key={k} value={k}>
+                  {label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem disabled={applied === 0 && organize === "list"} onClick={onReset}>
+          <RotateCcw className="size-4" strokeWidth={1.5} /> Reset
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -678,13 +754,13 @@ function OverviewPage({ overview, accountCount, onSync }: { overview: Record<Pro
           ))}
         </div>
 
-        <div className="flex items-start gap-3 rounded-lg border bg-muted/40 p-3 text-left">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-background">
+        <div className="flex items-start gap-3 rounded-lg border p-3 text-left">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
             <ShieldCheck className="size-4 text-muted-foreground" strokeWidth={1.5} />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium">Your chats stay on your desktop</p>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">Private to you. Nothing is uploaded, and only update checks go online.</p>
+            <p className="text-xs text-muted-foreground">Private to you. Nothing is uploaded.</p>
           </div>
         </div>
 
@@ -728,6 +804,52 @@ function Tip({ label, children }: { label: string; children: ReactNode }) {
       <TooltipTrigger render={children as ReactElement} />
       <TooltipContent className="max-w-xs">{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function DeleteDialog({ chat, onClose, onConfirm }: { chat: Chat | null; onClose: () => void; onConfirm: (c: Chat) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const tool = chat?.provider === "codex" ? "Codex" : "Claude Code";
+  return (
+    <AlertDialog open={!!chat} onOpenChange={(o) => !o && !busy && onClose()}>
+      <AlertDialogContent className="sm:max-w-md">
+        <AlertDialogHeader>
+          <div className="flex items-start gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+              <Trash2 className="size-4 text-destructive" strokeWidth={1.5} />
+            </div>
+            <div className="min-w-0 space-y-1">
+              <AlertDialogTitle className="text-base font-medium">Delete this chat?</AlertDialogTitle>
+              <AlertDialogDescription>
+                “{chat?.title}” moves to the Recycle Bin and disappears from {tool}. You can restore it from the Recycle Bin.
+                {chat?.backup ? " This is a backup copy, so nothing else is removed." : " A copy in your backup folder is kept."}
+              </AlertDialogDescription>
+            </div>
+          </div>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="grid grid-cols-2 gap-2 sm:flex">
+          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={busy}
+            onClick={async (e) => {
+              e.preventDefault();
+              if (!chat) return;
+              setBusy(true);
+              try {
+                await onConfirm(chat);
+              } catch (err) {
+                sonner(String(err));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -821,7 +943,7 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
                     key={a.id}
                     title={a.hint}
                     disabled={busyId !== null}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60"
+                    className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && "text-destructive hover:bg-destructive/10")}
                     onClick={async () => {
                       setBusyId(a.id);
                       try {
@@ -834,7 +956,7 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
                       }
                     }}
                   >
-                    {busyId === a.id ? <Loader2 className="size-4 animate-spin" /> : <Icon className="size-4 text-muted-foreground" strokeWidth={1.5} />}
+                    {busyId === a.id ? <Loader2 className="size-4 animate-spin" /> : <Icon className={cn("size-4", a.danger ? "text-destructive" : "text-muted-foreground")} strokeWidth={1.5} />}
                     {a.label}
                   </button>
                 );

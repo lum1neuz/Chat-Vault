@@ -159,6 +159,7 @@ export type ChatAction = {
   group: "Chat" | "Continue" | "Open" | "Copy" | "Save";
   /** 1 and 2 are the two buttons shown in the chat header. */
   slot?: 1 | 2;
+  danger?: boolean;
   run: () => Promise<void>;
 };
 
