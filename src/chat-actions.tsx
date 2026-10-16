@@ -40,7 +40,21 @@ export const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 export const fmtSize = (b: number) =>
   b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
-export const accountLabel = (a: string) => (a === "unknown" ? "No account info" : `Account ${a.slice(0, 8)}`);
+export type AccountInfo = {
+  id: string;
+  orgs: number;
+  desktopCurrent: boolean;
+  cliCurrent: boolean;
+  email: string | null;
+  name: string | null;
+  plan: string | null;
+};
+let accountNames: Record<string, string> = {};
+export const setAccountNames = (list: AccountInfo[]) => {
+  accountNames = Object.fromEntries(list.filter((a) => a.email).map((a) => [a.id, a.email as string]));
+};
+export const accountLabel = (a: string) =>
+  a === "unknown" ? "No account info" : (accountNames[a] ?? `Account ${a.slice(0, 8)}`);
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 

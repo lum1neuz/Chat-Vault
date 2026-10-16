@@ -37,7 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ClaudeLogo } from "@/claude-logo";
-import { accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg } from "@/chat-actions";
+import { accountLabel, setAccountNames, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg, type AccountInfo } from "@/chat-actions";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Hit = { id: string; snippet: string };
@@ -71,8 +71,15 @@ export default function App() {
     localStorage.setItem("theme", dark ? "dark" : "light");
   }, [dark]);
 
+  const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
   const load = useCallback(() => {
     setChats(null);
+    invoke<AccountInfo[]>("account_info")
+      .then((a) => {
+        setAccountNames(a);
+        setAccountInfo(a);
+      })
+      .catch(() => {});
     invoke<Chat[]>("list_chats").then(setChats).catch((e) => setError(String(e)));
   }, []);
   useEffect(load, [load]);
@@ -88,6 +95,11 @@ export default function App() {
       });
   }, [toast]);
 
+  const tag = (id: string) => {
+    const a = accountInfo.find((x) => x.id === id);
+    const parts = [a?.desktopCurrent && "Desktop", a?.cliCurrent && "CLI"].filter(Boolean);
+    return parts.length ? ` · ${parts.join(" + ")}` : "";
+  };
   const accounts = useMemo(() => {
     const m = new Map<string, number>();
     chats?.forEach((c) => m.set(c.account, (m.get(c.account) ?? 0) + 1));
@@ -194,7 +206,7 @@ export default function App() {
             <Select
               value={account}
               onValueChange={(v) => v && setAccount(v)}
-              items={{ all: `All accounts · ${chats?.length ?? 0}`, ...Object.fromEntries(accounts.map(([a, n]) => [a, `${accountLabel(a)} · ${n}`])) }}
+              items={{ all: `All accounts · ${chats?.length ?? 0}`, ...Object.fromEntries(accounts.map(([a, n]) => [a, `${accountLabel(a)} · ${n}${tag(a)}`])) }}
             >
               <SelectTrigger className="h-9 w-full">
                 <SelectValue />
@@ -203,7 +215,7 @@ export default function App() {
                 <SelectItem value="all">All accounts · {chats?.length ?? 0}</SelectItem>
                 {accounts.map(([a, n]) => (
                   <SelectItem key={a} value={a}>
-                    {accountLabel(a)} · {n}
+                    {accountLabel(a)} · {n}{tag(a)}
                   </SelectItem>
                 ))}
               </SelectContent>

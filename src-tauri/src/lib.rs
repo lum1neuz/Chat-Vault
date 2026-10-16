@@ -360,6 +360,53 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountInfo {
+    id: String,
+    orgs: usize,
+    desktop_current: bool,
+    cli_current: bool,
+    email: Option<String>,
+    name: Option<String>,
+    plan: Option<String>,
+}
+
+/// What can be learned locally about each account folder. Only the account the
+/// Claude Code CLI is signed in to has an email on disk.
+#[tauri::command]
+fn account_info() -> Vec<AccountInfo> {
+    let desktop_current = env_path("APPDATA")
+        .map(|p| p.join("Claude").join("config.json"))
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("lastKnownAccountUuid").and_then(|x| x.as_str()).map(String::from));
+    let cli = env_path("USERPROFILE")
+        .map(|p| p.join(".claude.json"))
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("oauthAccount").cloned());
+    let cli_id = cli.as_ref().and_then(|o| o.get("accountUuid")).and_then(|x| x.as_str()).map(String::from);
+    let get = |k: &str| cli.as_ref().and_then(|o| o.get(k)).and_then(|x| x.as_str()).map(String::from);
+    let Some(root) = sessions_dir() else { return Vec::new() };
+    subdirs(&root)
+        .into_iter()
+        .filter_map(|d| {
+            let id = d.file_name()?.to_string_lossy().to_string();
+            let is_cli = cli_id.as_deref() == Some(id.as_str());
+            Some(AccountInfo {
+                orgs: subdirs(&d).len(),
+                desktop_current: desktop_current.as_deref() == Some(id.as_str()),
+                cli_current: is_cli,
+                email: if is_cli { get("emailAddress") } else { None },
+                name: if is_cli { get("displayName") } else { None },
+                plan: if is_cli { get("organizationType") } else { None },
+                id,
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
     if !Path::new(&path).is_dir() {
@@ -474,6 +521,7 @@ pub fn run() {
             reveal_in_folder,
             open_in_claude,
             open_folder,
+            account_info,
             save_markdown,
             save_handoff,
             launch_agent
