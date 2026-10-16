@@ -1,36 +1,18 @@
+mod index;
+mod paths;
+mod providers;
+mod sync;
+
+use index::{ChatSummary, Overview, Page};
+use paths::*;
+use providers::{clip, messages_for, Msg};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::collections::VecDeque;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ChatSummary {
-    id: String,
-    local_id: Option<String>,
-    title: String,
-    account: String,
-    project: String,
-    cwd: Option<String>,
-    created_ms: Option<i64>,
-    last_ms: i64,
-    archived: bool,
-    size: u64,
-    path: String,
-    model: Option<String>,
-    has_metadata: bool,
-}
-
-#[derive(Serialize)]
-struct Msg {
-    role: String,
-    ts: String,
-    text: String,
-    kind: String,
-}
+use tauri::AppHandle;
 
 #[derive(Serialize)]
 struct SearchHit {
@@ -38,269 +20,130 @@ struct SearchHit {
     snippet: String,
 }
 
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).map(PathBuf::from)
+#[derive(Serialize)]
+struct MsgPage {
+    messages: Vec<Msg>,
+    total: usize,
+    start: usize,
 }
 
-fn projects_dir() -> Option<PathBuf> {
-    env_path("USERPROFILE").map(|p| p.join(".claude").join("projects"))
-}
-
-fn sessions_dir() -> Option<PathBuf> {
-    env_path("APPDATA").map(|p| p.join("Claude").join("claude-code-sessions"))
-}
-
-fn subdirs(p: &Path) -> Vec<PathBuf> {
-    fs::read_dir(p)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-struct Meta {
-    local_id: Option<String>,
-    title: Option<String>,
-    account: String,
-    cwd: Option<String>,
-    created: Option<i64>,
-    last: Option<i64>,
-    archived: bool,
-    model: Option<String>,
-}
-
-fn load_metadata() -> HashMap<String, Meta> {
-    let mut out = HashMap::new();
-    let Some(root) = sessions_dir() else { return out };
-    for acct in subdirs(&root) {
-        let acct_name = acct
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        for org in subdirs(&acct) {
-            let Ok(rd) = fs::read_dir(&org) else { continue };
-            for f in rd.flatten() {
-                let p = f.path();
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                if !(name.starts_with("local_") && name.ends_with(".json")) {
-                    continue;
-                }
-                let Ok(txt) = fs::read_to_string(&p) else { continue };
-                let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue };
-                let Some(cli) = v.get("cliSessionId").and_then(|x| x.as_str()) else { continue };
-                let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
-                out.insert(
-                    cli.to_string(),
-                    Meta {
-                        local_id: s("sessionId"),
-                        title: s("title"),
-                        account: acct_name.clone(),
-                        cwd: s("cwd"),
-                        created: v.get("createdAt").and_then(|x| x.as_i64()),
-                        last: v.get("lastActivityAt").and_then(|x| x.as_i64()),
-                        archived: v.get("isArchived").and_then(|x| x.as_bool()).unwrap_or(false),
-                        model: s("model"),
-                    },
-                );
-            }
-        }
-    }
-    out
-}
-
-fn is_noise(t: &str) -> bool {
-    let t = t.trim_start();
-    t.starts_with("<system-reminder>")
-        || t.starts_with("<local-command")
-        || t.starts_with("<command-name>")
-        || t.starts_with("<command-message>")
-        || t.starts_with("<ide_")
-        || t.starts_with("[Request interrupted")
-}
-
-fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
+fn provider_ok(p: &str) -> Result<(), String> {
+    if p == "claude" || p == "codex" {
+        Ok(())
     } else {
-        let mut out: String = s.chars().take(n).collect();
-        out.push('…');
-        out
+        Err("Unknown provider".into())
     }
 }
 
-/// Extracts displayable messages from one transcript line.
-fn line_messages(v: &Value) -> Vec<Msg> {
-    let mut out = Vec::new();
-    let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-    if ty != "user" && ty != "assistant" {
-        return out;
-    }
-    if v.get("isMeta").and_then(|x| x.as_bool()).unwrap_or(false) {
-        return out;
-    }
-    let ts = v.get("timestamp").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let role = ty.to_string();
-    let Some(content) = v.get("message").and_then(|m| m.get("content")) else { return out };
-    let push_text = |out: &mut Vec<Msg>, t: &str| {
-        if t.trim().is_empty() || (role == "user" && is_noise(t)) {
-            return;
-        }
-        let kind = if role == "user" && t.starts_with("This session is being continued") {
-            "summary"
-        } else {
-            "text"
-        };
-        out.push(Msg { role: role.clone(), ts: ts.clone(), text: t.to_string(), kind: kind.into() });
-    };
-    match content {
-        Value::String(s) => push_text(&mut out, s),
-        Value::Array(blocks) => {
-            for b in blocks {
-                match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
-                    "text" => {
-                        if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
-                            push_text(&mut out, t);
-                        }
-                    }
-                    "image" => out.push(Msg {
-                        role: role.clone(),
-                        ts: ts.clone(),
-                        text: "[Image]".into(),
-                        kind: "image".into(),
-                    }),
-                    "tool_use" => {
-                        let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
-                        let inp = b.get("input");
-                        let detail = inp
-                            .and_then(|i| {
-                                ["description", "command", "file_path", "pattern", "url", "query", "prompt"]
-                                    .iter()
-                                    .find_map(|k| i.get(*k).and_then(|x| x.as_str()))
-                            })
-                            .unwrap_or("");
-                        out.push(Msg {
-                            role: role.clone(),
-                            ts: ts.clone(),
-                            text: format!("{}: {}", name, clip(detail.lines().next().unwrap_or(""), 160)),
-                            kind: "tool".into(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-    out
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-fn first_user_text(path: &Path) -> Option<String> {
-    let f = File::open(path).ok()?;
-    for line in BufReader::new(f).lines().take(400).flatten() {
-        if !line.contains("\"type\":\"user\"") {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        if let Some(m) = line_messages(&v).into_iter().find(|m| m.role == "user" && m.kind == "text") {
-            return Some(clip(m.text.trim(), 80));
-        }
+/// Lines worth parsing. Skipping the rest keeps very large transcripts fast.
+fn relevant(provider: &str, line: &str) -> bool {
+    if provider == "codex" {
+        line.contains("\"response_item\"")
+    } else {
+        line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")
     }
-    None
 }
 
-fn project_label(dir: &Path, cwd: &Option<String>) -> String {
-    if let Some(c) = cwd {
-        if let Some(n) = Path::new(c).file_name() {
-            return n.to_string_lossy().to_string();
-        }
+fn clip_msg(mut m: Msg, max: usize) -> Msg {
+    if m.text.chars().count() > max {
+        m.text = clip(&m.text, max);
     }
-    dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    m
 }
 
 #[tauri::command]
-fn list_chats() -> Vec<ChatSummary> {
-    let meta = load_metadata();
-    let mut chats = Vec::new();
-    let Some(root) = projects_dir() else { return chats };
-    for dir in subdirs(&root) {
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
-        for f in rd.flatten() {
-            let p = f.path();
-            if p.extension().map(|e| e != "jsonl").unwrap_or(true) {
-                continue;
-            }
-            let id = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            let md = f.metadata().ok();
-            let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
-            let mtime = md
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let chat = if let Some(m) = meta.get(&id) {
-                ChatSummary {
-                    id: id.clone(),
-                    local_id: m.local_id.clone(),
-                    title: m.title.clone().unwrap_or_else(|| "Untitled".into()),
-                    account: m.account.clone(),
-                    project: project_label(&dir, &m.cwd),
-                    cwd: m.cwd.clone(),
-                    created_ms: m.created,
-                    last_ms: m.last.unwrap_or(mtime),
-                    archived: m.archived,
-                    size,
-                    path: p.to_string_lossy().to_string(),
-                    model: m.model.clone(),
-                    has_metadata: true,
-                }
-            } else {
-                let Some(title) = first_user_text(&p) else { continue };
-                ChatSummary {
-                    id: id.clone(),
-                    local_id: None,
-                    title,
-                    account: "unknown".into(),
-                    project: project_label(&dir, &None),
-                    cwd: None,
-                    created_ms: None,
-                    last_ms: mtime,
-                    archived: false,
-                    size,
-                    path: p.to_string_lossy().to_string(),
-                    model: None,
-                    has_metadata: false,
-                }
-            };
-            chats.push(chat);
-        }
-    }
-    chats.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
-    chats
-}
-
-fn check_transcript(path: &str) -> Result<PathBuf, String> {
-    let p = PathBuf::from(path);
-    let root = projects_dir().ok_or("Cannot find the Claude projects folder")?;
-    let canon = p.canonicalize().map_err(|e| e.to_string())?;
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    if !canon.starts_with(&root) || canon.extension().map(|e| e != "jsonl").unwrap_or(true) {
-        return Err("That file is not a Claude transcript".into());
-    }
-    Ok(canon)
+async fn refresh_index(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || index::refresh(Some(&app)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn read_chat(path: String) -> Result<Vec<Msg>, String> {
+async fn query_chats(provider: String, account: Option<String>, q: String, offset: i64, limit: i64, sort: Option<String>, scope: Option<String>) -> Result<Page, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || index::query(&provider, account, &q, offset, limit.clamp(1, 200), sort.as_deref().unwrap_or("recent"), scope.as_deref().unwrap_or("all")))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn provider_overview(provider: String) -> Result<Overview, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || index::overview(&provider))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn chats_by_ids(provider: String, ids: Vec<String>) -> Result<Vec<ChatSummary>, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || index::by_ids(&provider, &ids[..ids.len().min(300)]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// A window of messages. `before` is a message index; without it the newest `limit` messages come back.
+#[tauri::command]
+async fn read_chat_page(provider: String, path: String, before: Option<usize>, limit: usize) -> Result<MsgPage, String> {
+    provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
         let p = check_transcript(&path)?;
-        let f = File::open(p).map_err(|e| e.to_string())?;
+        let lines = open_lines(&p).ok_or("Cannot open that chat")?;
+        let limit = limit.clamp(1, 2000);
+        let mut idx = 0usize;
+        let mut ring: VecDeque<Msg> = VecDeque::new();
+        let mut picked: Vec<Msg> = Vec::new();
+        let lo = before.map(|b| b.saturating_sub(limit)).unwrap_or(0);
+        for line in lines {
+            if !relevant(&provider, &line) {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            for m in messages_for(&provider, &v) {
+                let m = clip_msg(m, 30_000);
+                match before {
+                    None => {
+                        ring.push_back(m);
+                        if ring.len() > limit {
+                            ring.pop_front();
+                        }
+                    }
+                    Some(b) => {
+                        if idx >= lo && idx < b {
+                            picked.push(m);
+                        }
+                    }
+                }
+                idx += 1;
+            }
+        }
+        Ok(match before {
+            None => MsgPage { start: idx - ring.len(), total: idx, messages: ring.into_iter().collect() },
+            Some(_) => MsgPage { start: lo, total: idx, messages: picked },
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Every readable message (no tool steps), used for exports and handoff files.
+#[tauri::command]
+async fn read_chat_all(provider: String, path: String) -> Result<Vec<Msg>, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = check_transcript(&path)?;
+        let lines = open_lines(&p).ok_or("Cannot open that chat")?;
         let mut out = Vec::new();
-        for line in BufReader::new(f).lines().flatten() {
+        for line in lines {
+            if !relevant(&provider, &line) {
+                continue;
+            }
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                out.extend(line_messages(&v));
+                out.extend(messages_for(&provider, &v).into_iter().filter(|m| m.kind != "tool").map(|m| clip_msg(m, 20_000)));
             }
         }
         Ok(out)
@@ -309,22 +152,24 @@ async fn read_chat(path: String) -> Result<Vec<Msg>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Searches the text of the most recent chats of one provider.
 #[tauri::command]
-async fn search_chats(query: String) -> Result<Vec<SearchHit>, String> {
+async fn deep_search(provider: String, query: String) -> Result<Vec<SearchHit>, String> {
+    provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
         let q = query.trim().to_lowercase();
         if q.chars().count() < 2 {
             return Ok(Vec::new());
         }
         let mut hits = Vec::new();
-        for chat in list_chats() {
-            let Ok(f) = File::open(&chat.path) else { continue };
-            'file: for line in BufReader::new(f).lines().flatten() {
-                if !line.to_lowercase().contains(&q) {
+        for (id, path) in index::recent_paths(&provider, 3000)? {
+            let Some(lines) = open_lines(Path::new(&path)) else { continue };
+            'file: for line in lines {
+                if !relevant(&provider, &line) || !line.to_lowercase().contains(&q) {
                     continue;
                 }
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                for m in line_messages(&v) {
+                for m in messages_for(&provider, &v) {
                     if m.kind == "tool" {
                         continue;
                     }
@@ -336,11 +181,13 @@ async fn search_chats(query: String) -> Result<Vec<SearchHit>, String> {
                             .nth(40)
                             .map(|(i, _)| i)
                             .unwrap_or(0);
-                        let snippet = clip(m.text[start..].replace('\n', " ").trim(), 140);
-                        hits.push(SearchHit { id: chat.id.clone(), snippet });
+                        hits.push(SearchHit { id: id.clone(), snippet: clip(m.text[start..].replace('\n', " ").trim(), 140) });
                         break 'file;
                     }
                 }
+            }
+            if hits.len() >= 300 {
+                break;
             }
         }
         Ok(hits)
@@ -353,8 +200,113 @@ async fn search_chats(query: String) -> Result<Vec<SearchHit>, String> {
 fn reveal_in_folder(path: String) -> Result<(), String> {
     let p = check_transcript(&path)?;
     let p = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-    Command::new("explorer")
-        .arg(format!("/select,{}", p))
+    Command::new("explorer").arg(format!("/select,{}", p)).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    if !Path::new(&path).is_dir() {
+        return Err("That folder no longer exists".into());
+    }
+    Command::new("explorer").arg(&path).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_backup_folder() -> Result<(), String> {
+    let b = backup_root().ok_or("No Documents folder")?;
+    fs::create_dir_all(&b).map_err(|e| e.to_string())?;
+    Command::new("explorer").arg(&b).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_in_claude(local_id: String) -> Result<(), String> {
+    if !local_id.starts_with("local_") || !local_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("Invalid session id".into());
+    }
+    Command::new("cmd")
+        .args(["/C", "start", "", &format!("claude://claude.ai/epitaxy/{}", local_id)])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn save_markdown(title: String, markdown: String) -> Result<String, String> {
+    let dir = home().ok_or("No user profile")?.join("Desktop").join("Claude Chats");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
+    let file = dir.join(format!("{}.md", clip(safe.trim(), 60).trim_end_matches('…')));
+    fs::write(&file, markdown).map_err(|e| e.to_string())?;
+    Command::new("explorer").arg(format!("/select,{}", file.to_string_lossy())).spawn().map_err(|e| e.to_string())?;
+    Ok(file.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn save_handoff(title: String, content: String) -> Result<String, String> {
+    let dir = home().ok_or("No user profile")?.join("Documents").join("ChatVault Handoffs");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe: String = title.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let file = dir.join(format!("{}-{}.md", clip(&safe, 40).trim_end_matches('…'), stamp));
+    fs::write(&file, content).map_err(|e| e.to_string())?;
+    Ok(file.to_string_lossy().to_string())
+}
+
+const HANDOFF_PROMPT: &str = "It is the transcript of an earlier AI coding session on this project. Continue the work from exactly where it stopped, and follow the project rules it mentions.";
+
+/// Opens a new PowerShell window in the chat's folder and starts Claude Code or Codex there.
+/// agent: claude | claude-fork | claude-handoff | codex-resume | codex-fork | codex-handoff
+#[tauri::command]
+fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<String>) -> Result<(), String> {
+    let dir = cwd
+        .filter(|c| Path::new(c).is_dir())
+        .map(PathBuf::from)
+        .or_else(home)
+        .ok_or("No folder to start in")?;
+    let handoff_path = |h: Option<String>| -> Result<String, String> {
+        let path = h.ok_or("Missing handoff file")?;
+        if path.contains('\'') || !Path::new(&path).is_file() {
+            return Err("Invalid handoff file".into());
+        }
+        Ok(path)
+    };
+    let script = match agent.as_str() {
+        "claude" | "claude-fork" => {
+            if !valid_id(&id) {
+                return Err("Invalid chat id".into());
+            }
+            let fork = if agent == "claude-fork" { " --fork-session" } else { "" };
+            format!("claude --resume {}{}", id, fork)
+        }
+        "claude-handoff" => {
+            let path = handoff_path(handoff)?;
+            let folder = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            format!("claude --add-dir '{}' 'Read the file {} completely. {}'", folder, path, HANDOFF_PROMPT)
+        }
+        "codex-resume" | "codex-fork" => {
+            if !valid_id(&id) {
+                return Err("Invalid chat id".into());
+            }
+            format!("codex {} {}", if agent == "codex-fork" { "fork" } else { "resume" }, id)
+        }
+        "codex-handoff" => {
+            let path = handoff_path(handoff)?;
+            format!("codex 'Read the file {} completely. {}'", path, HANDOFF_PROMPT)
+        }
+        _ => return Err("Unknown agent".into()),
+    };
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    Command::new("powershell")
+        .args(["-NoLogo", "-NoExit", "-Command", &script])
+        .current_dir(dir)
+        .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -372,7 +324,7 @@ struct AccountInfo {
     plan: Option<String>,
 }
 
-/// What can be learned locally about each account folder. Only the account the
+/// What can be learned locally about each Claude account folder. Only the account the
 /// Claude Code CLI is signed in to has an email on disk.
 #[tauri::command]
 fn account_info() -> Vec<AccountInfo> {
@@ -381,14 +333,14 @@ fn account_info() -> Vec<AccountInfo> {
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.get("lastKnownAccountUuid").and_then(|x| x.as_str()).map(String::from));
-    let cli = env_path("USERPROFILE")
+    let cli = home()
         .map(|p| p.join(".claude.json"))
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.get("oauthAccount").cloned());
     let cli_id = cli.as_ref().and_then(|o| o.get("accountUuid")).and_then(|x| x.as_str()).map(String::from);
     let get = |k: &str| cli.as_ref().and_then(|o| o.get(k)).and_then(|x| x.as_str()).map(String::from);
-    let Some(root) = sessions_dir() else { return Vec::new() };
+    let Some(root) = claude_meta() else { return Vec::new() };
     subdirs(&root)
         .into_iter()
         .filter_map(|d| {
@@ -408,158 +360,87 @@ fn account_info() -> Vec<AccountInfo> {
 }
 
 #[tauri::command]
-fn open_folder(path: String) -> Result<(), String> {
-    if !Path::new(&path).is_dir() {
-        return Err("That folder no longer exists".into());
-    }
-    Command::new("explorer").arg(&path).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+async fn sync_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::backup(&app)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn open_in_claude(local_id: String) -> Result<(), String> {
-    if !local_id.starts_with("local_")
-        || !local_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err("Invalid session id".into());
-    }
-    Command::new("cmd")
-        .args(["/C", "start", "", &format!("claude://claude.ai/epitaxy/{}", local_id)])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+async fn restore_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::restore(&app)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn save_markdown(title: String, markdown: String) -> Result<String, String> {
-    let desktop = env_path("USERPROFILE").ok_or("No user profile")?.join("Desktop").join("Claude Chats");
-    fs::create_dir_all(&desktop).map_err(|e| e.to_string())?;
-    let safe: String = title
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' })
-        .collect();
-    let file = desktop.join(format!("{}.md", clip(safe.trim(), 60).trim_end_matches('…')));
-    fs::write(&file, markdown).map_err(|e| e.to_string())?;
-    Command::new("explorer")
-        .arg(format!("/select,{}", file.to_string_lossy()))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(file.to_string_lossy().to_string())
-}
-
-fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
-
-#[tauri::command]
-fn save_handoff(title: String, content: String) -> Result<String, String> {
-    let dir = env_path("USERPROFILE")
-        .ok_or("No user profile")?
-        .join("Documents")
-        .join("ChatVault Handoffs");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let safe: String = title
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
-        .collect();
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let file = dir.join(format!("{}-{}.md", clip(&safe, 40).trim_end_matches('…'), stamp));
-    fs::write(&file, content).map_err(|e| e.to_string())?;
-    Ok(file.to_string_lossy().to_string())
-}
-
-/// Opens a new PowerShell window in the chat's folder and starts Claude Code or Codex there.
-#[tauri::command]
-fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<String>) -> Result<(), String> {
-    let dir = cwd
-        .filter(|c| Path::new(c).is_dir())
-        .map(PathBuf::from)
-        .or_else(|| env_path("USERPROFILE"))
-        .ok_or("No folder to start in")?;
-    let script = match agent.as_str() {
-        "claude" | "claude-fork" => {
-            if !valid_id(&id) {
-                return Err("Invalid chat id".into());
-            }
-            let fork = if agent == "claude-fork" { " --fork-session" } else { "" };
-            format!("claude --resume {}{}", id, fork)
-        }
-        "codex" => {
-            let path = handoff.ok_or("Missing handoff file")?;
-            if path.contains('\'') || !Path::new(&path).is_file() {
-                return Err("Invalid handoff file".into());
-            }
-            format!(
-                "codex 'Read the file {} completely. It is the transcript of an earlier Claude Code session on this project. Continue the work from exactly where it stopped, and follow the project rules it mentions.'",
-                path
-            )
-        }
-        _ => return Err("Unknown agent".into()),
-    };
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    Command::new("powershell")
-        .args(["-NoLogo", "-NoExit", "-Command", &script])
-        .current_dir(dir)
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+async fn backup_status() -> Result<sync::BackupStatus, String> {
+    tauri::async_runtime::spawn_blocking(sync::status).await.map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
-            list_chats,
-            read_chat,
-            search_chats,
+            refresh_index,
+            query_chats,
+            provider_overview,
+            chats_by_ids,
+            read_chat_page,
+            read_chat_all,
+            deep_search,
             reveal_in_folder,
-            open_in_claude,
             open_folder,
-            account_info,
+            open_backup_folder,
+            open_in_claude,
             save_markdown,
             save_handoff,
-            launch_agent
+            launch_agent,
+            account_info,
+            sync_chats,
+            restore_chats,
+            backup_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
-    fn scans_real_chats() {
-        let chats = list_chats();
-        println!("chats: {}", chats.len());
-        let mut accts: HashMap<String, usize> = HashMap::new();
-        for c in &chats {
-            *accts.entry(c.account.clone()).or_default() += 1;
+    fn indexes_and_reads_real_chats() {
+        let t = Instant::now();
+        index::refresh(None).unwrap();
+        println!("refresh: {:?}", t.elapsed());
+        let t = Instant::now();
+        index::refresh(None).unwrap();
+        println!("second refresh (no changes): {:?}", t.elapsed());
+        for prov in ["claude", "codex"] {
+            let o = index::overview(prov).unwrap();
+            println!("{prov}: {} chats, accounts {:?}", o.total, o.accounts.iter().map(|a| (a.id.chars().take(8).collect::<String>(), a.count)).collect::<Vec<_>>());
+            assert!(o.total > 0, "{prov} has chats");
+            let t = Instant::now();
+            let page = index::query(prov, None, "", 0, 20, "recent", "all").unwrap();
+            println!("  page of {} in {:?}, first: {:?}", page.items.len(), t.elapsed(), page.items.first().map(|c| c.title.clone()));
+            let page = index::query(prov, None, "fuel", 0, 5, "recent", "all").unwrap();
+            println!("  search 'fuel': {} total", page.total);
         }
-        println!("accounts: {:?}", accts);
-        assert!(!chats.is_empty());
-        let big = chats.iter().find(|c| c.id.starts_with("79cbef96")).expect("target chat");
-        println!("title: {} / project: {} / cwd: {:?}", big.title, big.project, big.cwd);
-        let f = File::open(&big.path).unwrap();
+        // The biggest codex rollout must still page quickly.
+        let big = index::query("codex", None, "", 0, 200, "recent", "all").unwrap().items.into_iter().max_by_key(|c| c.size).unwrap();
+        println!("biggest codex chat: {} ({} MB)", big.title, big.size / 1_000_000);
+        let t = Instant::now();
         let mut n = 0;
-        let mut tools = 0;
-        for line in BufReader::new(f).lines().flatten() {
+        let mut text = 0;
+        for line in open_lines(Path::new(&big.path)).unwrap() {
+            if !relevant("codex", &line) { continue; }
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                for m in line_messages(&v) {
-                    n += 1;
-                    if m.kind == "tool" {
-                        tools += 1;
-                    }
-                }
+                for m in messages_for("codex", &v) { n += 1; if m.kind == "text" { text += 1; } }
             }
         }
-        println!("messages: {} (tool steps {})", n, tools);
-        assert!(n > 500);
+        println!("  parsed {} messages ({} text) in {:?}", n, text, t.elapsed());
+        assert!(text > 0);
     }
 }

@@ -1,143 +1,204 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   Bot,
-  Clock,
-  FileDown,
-  Users,
-  ArrowDown,
-  ChevronDown,
   ChevronRight,
+  Clock,
+  DatabaseBackup,
+  Eye,
+  ListFilter,
+  RotateCcw,
+  FileDown,
+  LayoutDashboard,
+  Loader2,
   MessagesSquare,
   Moon,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
   RefreshCw,
   Search,
+  ShieldCheck,
   Sun,
-  MoreHorizontal,
-  Loader2,
-  Wrench,
+  Users,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { ClaudeLogo } from "@/claude-logo";
-import { accountLabel, setAccountNames, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg, type AccountInfo } from "@/chat-actions";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-
-type Hit = { id: string; snippet: string };
+import { ProviderLogo } from "@/claude-logo";
+import { accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { ChatView } from "@/chat-view";
+import { CommandPalette } from "@/command-palette";
+import { Toggle } from "@/components/ui/toggle";
+import { SidebarSkeleton, StatSkeleton } from "@/skeletons";
+import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
+import { chatKey, useChatMeta, usePersisted } from "@/store";
+import { startAutoUpdate } from "@/updater";
+import { toast as sonner } from "sonner";
 
 const PAGE_SIZE = 20;
+const MSG_PAGE = 400;
 
-function useToast() {
-  const [msg, setMsg] = useState<string | null>(null);
-  const show = useCallback((m: string) => {
-    setMsg(m);
-    setTimeout(() => setMsg(null), 2200);
-  }, []);
-  return { msg, show };
-}
+type Overview = { total: number; accounts: { id: string; count: number }[]; latestMs: number | null };
+type Hit = { id: string; snippet: string };
+type IndexProg = { phase: string; done: number; total: number };
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function App() {
-  const [chats, setChats] = useState<Chat[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [provider, setProvider] = usePersisted<Provider>("chatvault.provider", "claude");
+  const [accounts, setAccounts] = usePersisted<Record<string, string>>("chatvault.accounts", {});
+  const [showSteps, setShowSteps] = usePersisted("chatvault.steps", true);
+  const [sort, setSort] = usePersisted("chatvault.sort", "recent");
+  const [scope, setScope] = usePersisted("chatvault.scope", "all");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [headerOpen, setHeaderOpen] = usePersisted("chatvault.headerOpen", true);
+  const [pinnedOpen, setPinnedOpen] = usePersisted("chatvault.sec.pinned", true);
+  const [recentOpen, setRecentOpen] = usePersisted("chatvault.sec.recent", true);
+  const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
+  const { pins, names, togglePin, rename } = useChatMeta();
+
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null });
+  const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
+  const account = accounts[provider] ?? "all";
   const [query, setQuery] = useState("");
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<Chat[]>([]);
+  const [pinned, setPinned] = useState<Chat[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loadingList, setLoadingList] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [hits, setHits] = useState<Record<string, string> | null>(null);
   const [searching, setSearching] = useState(false);
-  const [account, setAccount] = useState<string>("all");
+  const [reloadKey, setReloadKey] = useState(0);
+  const [indexing, setIndexing] = useState<IndexProg | null>(null);
   const [selected, setSelected] = useState<Chat | null>(null);
-  const [msgs, setMsgs] = useState<Msg[] | null>(null);
-  const [showTools, setShowTools] = useState(false);
-  const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
-  const toast = useToast();
+  const [page, setPage] = useState<MsgPage | null>(null);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [renaming, setRenaming] = useState<Chat | null>(null);
+
+  const say = useCallback((m: string) => sonner(m), []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const named = useCallback((c: Chat): Chat => (names[chatKey(c)] ? { ...c, title: names[chatKey(c)] } : c), [names]);
+  const pinSet = useMemo(() => new Set(pins), [pins]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("theme", dark ? "dark" : "light");
   }, [dark]);
+  useEffect(() => {
+    const t = window.setTimeout(() => setQ(query.trim()), 250);
+    return () => window.clearTimeout(t);
+  }, [query]);
 
-  const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
-  const load = useCallback(() => {
-    setChats(null);
-    invoke<AccountInfo[]>("account_info")
-      .then((a) => {
-        setAccountNames(a);
-        setAccountInfo(a);
-      })
-      .catch(() => {});
-    invoke<Chat[]>("list_chats").then(setChats).catch((e) => setError(String(e)));
+  // Scan the disk (only new and changed chats are read), then reload what is on screen.
+  const rescan = useCallback(async () => {
+    if (!isTauri) return;
+    setIndexing({ phase: "Scanning", done: 0, total: 0 });
+    try {
+      const a = await invoke<AccountInfo[]>("account_info");
+      setAccountNames(a);
+      setAccountInfo(a);
+      await invoke("refresh_index");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIndexing(null);
+      setReloadKey((k) => k + 1);
+    }
   }, []);
-  useEffect(load, [load]);
-
-  const open = useCallback((chat: Chat) => {
-    setSelected(chat);
-    setMsgs(null);
-    invoke<Msg[]>("read_chat", { path: chat.path })
-      .then(setMsgs)
-      .catch((e) => {
-        setMsgs([]);
-        toast.show(String(e));
-      });
-  }, [toast]);
-
-  const tag = (id: string) => {
-    const a = accountInfo.find((x) => x.id === id);
-    const parts = [a?.desktopCurrent && "Desktop", a?.cliCurrent && "CLI"].filter(Boolean);
-    return parts.length ? ` · ${parts.join(" + ")}` : "";
-  };
-  const accounts = useMemo(() => {
-    const m = new Map<string, number>();
-    chats?.forEach((c) => m.set(c.account, (m.get(c.account) ?? 0) + 1));
-    return [...m.entries()];
-  }, [chats]);
-
-  const visible = useMemo(() => {
-    if (!chats) return [];
-    const q = query.trim().toLowerCase();
-    return chats.filter((c) => {
-      if (account !== "all" && c.account !== account) return false;
-      if (hits) return c.id in hits;
-      return !q || c.title.toLowerCase().includes(q) || c.project.toLowerCase().includes(q);
-    });
-  }, [chats, query, account, hits]);
-
-  const viewerRef = useRef<HTMLDivElement | null>(null);
-  const [showJump, setShowJump] = useState(false);
-  const viewport = () =>
-    viewerRef.current?.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]") ?? null;
-  useEffect(() => {
-    const el = viewport();
-    if (!el) return;
-    const onScroll = () => setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 400);
-    onScroll();
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, [selected, msgs, showTools]);
 
   useEffect(() => {
-    const el = viewport();
-    if (el) el.scrollTop = 0;
-  }, [selected]);
+    if (!isTauri) return;
+    const un = listen<IndexProg>("index-progress", (e) => setIndexing(e.payload.phase === "Done" ? null : e.payload));
+    void (async () => {
+      if (localStorage.getItem(AUTO_SYNC_KEY) === "1") await invoke("sync_chats").catch(() => {});
+      await rescan();
+    })();
+    const stopUpdates = startAutoUpdate();
+    return () => {
+      void un.then((f) => f());
+      stopUpdates();
+    };
+  }, [rescan]);
 
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  useEffect(() => {
+    if (!isTauri) return;
+    (["claude", "codex"] as Provider[]).forEach((p) =>
+      invoke<Overview>("provider_overview", { provider: p })
+        .then((o) => setOverview((s) => ({ ...s, [p]: o })))
+        .catch(() => {}),
+    );
+  }, [reloadKey]);
+
+  // Pinned chats of the current tool.
+  useEffect(() => {
+    if (!isTauri) return;
+    const ids = pins.filter((k) => k.startsWith(`${provider}:`)).map((k) => k.slice(provider.length + 1));
+    if (!ids.length) {
+      setPinned([]);
+      return;
+    }
+    invoke<Chat[]>("chats_by_ids", { provider, ids }).then(setPinned).catch(() => {});
+  }, [pins, provider, reloadKey]);
+
+  // First page of the list whenever the tool, account, search or index changes.
+  useEffect(() => {
+    if (!isTauri) return;
+    let stale = false;
+    setLoadingList(true);
+    setHits(null);
+    invoke<{ items: Chat[]; total: number }>("query_chats", { provider, account, q, offset: 0, limit: PAGE_SIZE, sort, scope })
+      .then((r) => {
+        if (stale) return;
+        setItems(r.items);
+        setTotal(r.total);
+        setError(null);
+      })
+      .catch((e) => !stale && setError(String(e)))
+      .finally(() => !stale && setLoadingList(false));
+    return () => {
+      stale = true;
+    };
+  }, [provider, account, q, sort, scope, reloadKey]);
+
+  const loadingMore = useRef(false);
+  const loadMore = useCallback(async () => {
+    if (loadingMore.current || hits) return;
+    loadingMore.current = true;
+    try {
+      const r = await invoke<{ items: Chat[]; total: number }>("query_chats", { provider, account, q, offset: items.length, limit: PAGE_SIZE, sort, scope });
+      setItems((cur) => [...cur, ...r.items]);
+      setTotal(r.total);
+    } finally {
+      loadingMore.current = false;
+    }
+  }, [provider, account, q, sort, scope, items.length, hits]);
+
   const sentinelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => setLimit(PAGE_SIZE), [query, account, hits, chats]);
-  const hasMore = visible.length > limit;
+  const hasMore = !hits && items.length < total;
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el || !hasMore) return;
@@ -145,9 +206,9 @@ export default function App() {
     const io = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && timer === undefined) {
         timer = window.setTimeout(() => {
-          setLimit((l) => l + PAGE_SIZE);
           timer = undefined;
-        }, 300);
+          void loadMore();
+        }, 250);
       }
     });
     io.observe(el);
@@ -155,67 +216,170 @@ export default function App() {
       io.disconnect();
       window.clearTimeout(timer);
     };
-  }, [hasMore, limit]);
+  }, [hasMore, loadMore, items.length, recentOpen]);
 
-  const runSearch = async () => {
-    if (query.trim().length < 2) return setHits(null);
+  const runDeepSearch = async () => {
+    if (query.trim().length < 2) return;
     setSearching(true);
     try {
-      const res = await invoke<Hit[]>("search_chats", { query });
+      const res = await invoke<Hit[]>("deep_search", { provider, query });
+      const found = await invoke<Chat[]>("chats_by_ids", { provider, ids: res.map((h) => h.id) });
       setHits(Object.fromEntries(res.map((h) => [h.id, h.snippet])));
+      setItems(found);
+      setTotal(found.length);
     } catch (e) {
-      toast.show(String(e));
+      say(String(e));
     } finally {
       setSearching(false);
     }
   };
 
-  const shown = msgs?.filter((m) => showTools || m.kind !== "tool") ?? [];
+  const open = useCallback(
+    (chat: Chat) => {
+      setSelected(chat);
+      setPage(null);
+      invoke<MsgPage>("read_chat_page", { provider: chat.provider, path: chat.path, before: null, limit: MSG_PAGE })
+        .then(setPage)
+        .catch((e) => {
+          setPage({ messages: [], total: 0, start: 0 });
+          say(String(e));
+        });
+    },
+    [say],
+  );
+
+  const loadEarlier = async () => {
+    if (!selected || !page || page.start === 0) return;
+    setLoadingEarlier(true);
+    try {
+      const r = await invoke<MsgPage>("read_chat_page", { provider: selected.provider, path: selected.path, before: page.start, limit: MSG_PAGE });
+      setPage({ messages: [...r.messages, ...page.messages], total: r.total, start: r.start });
+    } catch (e) {
+      say(String(e));
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
+  const loadAll = async () => {
+    if (!selected || !page) return;
+    let cur = page;
+    while (cur.start > 0) {
+      const r = await invoke<MsgPage>("read_chat_page", { provider: selected.provider, path: selected.path, before: cur.start, limit: 2000 });
+      cur = { messages: [...r.messages, ...cur.messages], total: r.total, start: r.start };
+      setPage(cur);
+    }
+  };
+
+  const switchProvider = (p: Provider) => {
+    if (p === provider) return;
+    setProvider(p);
+    setQuery("");
+    setSelected(null);
+  };
+
+  const tag = (id: string) => {
+    const a = accountInfo.find((x) => x.id === id);
+    const parts = [a?.desktopCurrent && "Desktop", a?.cliCurrent && "CLI"].filter(Boolean);
+    return parts.length ? ` · ${parts.join(" + ")}` : "";
+  };
+  const accountList = overview[provider]?.accounts ?? [];
+  const accountItems = useMemo(
+    () => ({
+      all: `All accounts · ${(overview[provider]?.total ?? 0).toLocaleString()}`,
+      ...Object.fromEntries(accountList.map((a) => [a.id, `${accountLabel(a.id)} · ${a.count.toLocaleString()}${provider === "claude" ? tag(a.id) : ""}`])),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [accountList, overview, provider, accountInfo],
+  );
+
+  const lq = q.toLowerCase();
+  const pinnedShown = pinned.filter((c) => !lq || named(c).title.toLowerCase().includes(lq) || c.project.toLowerCase().includes(lq));
+  const recent = items.filter((c) => !pinSet.has(chatKey(c)));
+  const msgs: Msg[] | null = page?.messages ?? null;
+
+  const extras = (c: Chat): ChatAction[] => [
+    { id: "view", label: "Open in ChatVault", hint: "Reads this chat here.", icon: Eye, group: "Chat", run: async () => open(c) },
+    {
+      id: "pin",
+      label: pinSet.has(chatKey(c)) ? "Unpin" : "Pin to top",
+      hint: "Pinned chats stay at the top of the list.",
+      icon: pinSet.has(chatKey(c)) ? PinOff : Pin,
+      group: "Chat",
+      run: async () => togglePin(chatKey(c)),
+    },
+    { id: "rename", label: "Rename", hint: "Give this chat your own name. The original is not changed.", icon: Pencil, group: "Chat", run: async () => setRenaming(c) },
+  ];
+
+  const row = (c: Chat) => (
+    <ChatRow
+      key={chatKey(c)}
+      chat={named(c)}
+      selected={selected?.id === c.id && selected.provider === c.provider}
+      pinned={pinSet.has(chatKey(c))}
+      hit={hits?.[c.id]}
+      msgs={selected?.id === c.id ? msgs : null}
+      extras={extras(c)}
+      onOpen={() => open(c)}
+      toast={say}
+    />
+  );
+
+  const cmeta = `${((overview.claude?.total ?? 0) + (overview.codex?.total ?? 0)).toLocaleString()} chats on this PC`;
 
   return (
     <TooltipProvider delay={200}>
       <div className="flex h-screen bg-background text-foreground">
         {/* Sidebar */}
         <aside className="flex w-[360px] shrink-0 flex-col border-r">
-          <div className="flex items-center gap-2 p-3">
+          <button
+            onClick={() => setSelected(null)}
+            className="flex items-center gap-2 p-3 text-left transition hover:bg-muted/60"
+            title="Back to the overview"
+          >
             <div className="flex size-8 items-center justify-center rounded-lg bg-muted">
               <MessagesSquare className="size-4 text-muted-foreground" strokeWidth={1.5} />
             </div>
             <div className="min-w-0 flex-1">
               <h1 className="text-base font-medium leading-tight">ChatVault</h1>
               <p className="truncate text-xs text-muted-foreground">
-                {chats ? `${chats.length} chats found on this PC` : "Scanning…"}
+                {indexing ? (indexing.total ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()}` : "Scanning this PC…") : cmeta}
               </p>
             </div>
-          </div>
+          </button>
 
-          <div className="space-y-2 px-3 pb-3">
+          <div className="space-y-2 px-3 pb-2">
+            <Button variant={selected === null ? "secondary" : "ghost"} className="h-9 w-full justify-start gap-2" onClick={() => setSelected(null)}>
+              <LayoutDashboard className="size-4" strokeWidth={1.5} /> Overview
+            </Button>
+            <Tabs value={provider} onValueChange={(v) => switchProvider(v as Provider)}>
+              <TabsList className="grid w-full grid-cols-2">
+                {(["claude", "codex"] as Provider[]).map((p) => (
+                  <TabsTrigger key={p} value={p} className="gap-1.5">
+                    <ProviderLogo provider={p} className="size-4" />
+                    {p === "claude" ? "Claude" : "Codex"}
+                    <span className="text-xs text-muted-foreground">{overview[p] ? overview[p]!.total.toLocaleString() : "…"}</span>
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
               <Input
                 className="h-9 pl-8"
                 placeholder="Filter by title, or press Enter to search inside chats"
                 value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  setHits(null);
-                }}
-                onKeyDown={(e) => e.key === "Enter" && runSearch()}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && runDeepSearch()}
               />
             </div>
-            <Select
-              value={account}
-              onValueChange={(v) => v && setAccount(v)}
-              items={{ all: `All accounts · ${chats?.length ?? 0}`, ...Object.fromEntries(accounts.map(([a, n]) => [a, `${accountLabel(a)} · ${n}${tag(a)}`])) }}
-            >
+            <Select value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
               <SelectTrigger className="h-9 w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All accounts · {chats?.length ?? 0}</SelectItem>
-                {accounts.map(([a, n]) => (
-                  <SelectItem key={a} value={a}>
-                    {accountLabel(a)} · {n}{tag(a)}
+                {Object.entries(accountItems).map(([id, label]) => (
+                  <SelectItem key={id} value={id}>
+                    {label}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -224,7 +388,7 @@ export default function App() {
             {hits && !searching && (
               <p className="text-xs text-muted-foreground">
                 {Object.keys(hits).length} chats contain “{query}”.{" "}
-                <button className="underline" onClick={() => setHits(null)}>
+                <button className="underline" onClick={() => setReloadKey((k) => k + 1)}>
                   Clear
                 </button>
               </p>
@@ -233,66 +397,68 @@ export default function App() {
           <Separator />
 
           <ScrollArea className="min-h-0 flex-1">
-            <div className="space-y-0.5 p-1.5">
-              {error && <p className="p-3 text-sm text-destructive">{error}</p>}
-              {!chats && !error && Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}
-              {chats && visible.length === 0 && (
-                <div className="flex flex-col items-center gap-2 p-8 text-center">
-                  <Search className="size-8 text-muted-foreground" strokeWidth={1.25} />
-                  <p className="text-sm font-medium">No Chats Found</p>
-                  <p className="text-xs text-muted-foreground">Try a different word or account.</p>
-                </div>
+            <div className="p-1.5">
+              {pinnedShown.length > 0 && (
+                <Section title="Pinned" count={pinnedShown.length} open={pinnedOpen} onOpenChange={setPinnedOpen}>
+                  {pinnedShown.map(row)}
+                </Section>
               )}
-              {visible.slice(0, limit).map((c) => (
-                <div
-                  key={c.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => open(c)}
-                  onKeyDown={(e) => e.key === "Enter" && open(c)}
-                  className={cn(
-                    "group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted",
-                    selected?.id === c.id && "border-border bg-muted",
-                  )}
-                >
-                  <div className="flex items-start gap-2.5">
-                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-                      <ClaudeLogo className="size-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium">{c.title}</span>
-                    {c.archived && <Archive className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}
-                    <ChatMenu chat={c} toast={toast.show} msgs={selected?.id === c.id ? msgs : null} />
+              <Section
+                title="Recents"
+                count={hits ? items.length : total}
+                open={recentOpen}
+                onOpenChange={setRecentOpen}
+                action={
+                  <FiltersMenu
+                    sort={sort}
+                    scope={scope}
+                    onSort={setSort}
+                    onScope={setScope}
+                    onReset={() => {
+                      setSort("recent");
+                      setScope("all");
+                    }}
+                  />
+                }
+              >
+                {error && <p className="p-3 text-sm text-destructive">{error}</p>}
+                {(loadingList || !!indexing) && items.length === 0 && <SidebarSkeleton rows={8} />}
+                {!loadingList && !indexing && !error && recent.length === 0 && (
+                  <div className="flex flex-col items-center gap-2 p-8 text-center">
+                    <Search className="size-8 text-muted-foreground" strokeWidth={1.25} />
+                    <p className="text-sm font-medium">No Chats Found</p>
+                    <p className="text-xs text-muted-foreground">Try a different word or account.</p>
                   </div>
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <span className="truncate">{c.project}</span>
-                    <span>·</span>
-                    <span className="shrink-0">{fmtDate(c.lastMs)}</span>
+                )}
+                {recent.map(row)}
+                {hasMore && (
+                  <div ref={sentinelRef}>
+                    <SidebarSkeleton rows={3} />
                   </div>
-                  {hits?.[c.id] && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{hits[c.id]}</p>}
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {visible.length > limit && (
-                <div ref={sentinelRef} className="space-y-0.5">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <Skeleton key={i} className="h-16 w-full" />
-                  ))}
-                </div>
-              )}
+                )}
+              </Section>
             </div>
           </ScrollArea>
         </aside>
 
-        {/* Viewer */}
+        {/* Content */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-            <p className="min-w-0 flex-1 truncate text-sm font-medium">{selected ? selected.title : "All chats"}</p>
-            <Tip label="Scan this PC for chats again.">
-              <Button variant="ghost" size="icon" onClick={load} aria-label="Refresh">
-                <RefreshCw className="size-4" />
+            <p className="min-w-0 flex-1 truncate text-sm font-medium">{selected ? named(selected).title : "Overview"}</p>
+            <Tip label="Search chats and actions (Ctrl+K)">
+              <Button variant="outline" size="sm" className="text-muted-foreground" onClick={() => setPaletteOpen(true)}>
+                <Search className="size-4" /> Search
+                <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
+              </Button>
+            </Tip>
+            <Tip label="Copy every Claude and Codex chat to your Documents folder, or restore them.">
+              <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>
+                <DatabaseBackup className="size-4" /> Sync &amp; backup
+              </Button>
+            </Tip>
+            <Tip label="Scan this PC for new chats.">
+              <Button variant="ghost" size="icon" onClick={rescan} aria-label="Refresh" disabled={!!indexing}>
+                <RefreshCw className={cn("size-4", indexing && "animate-spin")} />
               </Button>
             </Tip>
             <Tip label={dark ? "Switch to light theme" : "Switch to dark theme"}>
@@ -301,120 +467,258 @@ export default function App() {
               </Button>
             </Tip>
           </div>
-          {!selected ? (
-            <div className="flex flex-1 items-center justify-center overflow-auto p-6">
-              <div className="w-full max-w-xl space-y-6 text-center">
-                <div className="mx-auto flex size-12 items-center justify-center rounded-xl bg-muted">
-                  <MessagesSquare className="size-6 text-muted-foreground" strokeWidth={1.25} />
-                </div>
-                <div className="space-y-1">
-                  <h2 className="text-base font-medium">Pick a chat to read it</h2>
-                  <p className="text-sm text-muted-foreground">
-                    Chats from every Claude account used on this computer are listed on the left.
-                  </p>
-                </div>
-                <div className="grid grid-cols-3 gap-2 text-left">
-                  {[
-                    { icon: MessagesSquare, n: chats?.length ?? "…", label: "Chats found" },
-                    { icon: Users, n: accounts.length || "…", label: "Accounts" },
-                    { icon: Clock, n: chats?.[0] ? fmtDate(chats[0].lastMs) : "…", label: "Latest activity" },
-                  ].map((s) => (
-                    <div key={s.label} className="rounded-lg border bg-card p-3">
-                      <s.icon className="mb-2 size-4 text-muted-foreground" strokeWidth={1.5} />
-                      <p className="truncate text-sm font-medium">{s.n}</p>
-                      <p className="text-xs text-muted-foreground">{s.label}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="space-y-2 text-left">
-                  {[
-                    { icon: Search, title: "Search inside chats", text: "Type a word and press Enter to search the full text of every chat." },
-                    { icon: Bot, title: "Continue anywhere", text: "Use the three dots on a chat to continue it in Claude Code or Codex." },
-                    { icon: FileDown, title: "Keep a copy", text: "Save any chat as a Markdown file or a handoff file." },
-                  ].map((s) => (
-                    <div key={s.title} className="flex items-start gap-3 rounded-lg border p-3">
-                      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-                        <s.icon className="size-4 text-muted-foreground" strokeWidth={1.5} />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium">{s.title}</p>
-                        <p className="text-xs text-muted-foreground">{s.text}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              <header className="space-y-2 border-b p-4">
-                <div className="flex items-start gap-3">
-                  <div className="min-w-0 flex-1">
-                    <h2 className="truncate text-base font-medium">{selected.title}</h2>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                      <Badge variant="outline">{accountLabel(selected.account)}</Badge>
-                      <Badge variant="outline">{selected.project}</Badge>
-                      {selected.model && <Badge variant="outline">{selected.model}</Badge>}
-                      <span className="text-xs text-muted-foreground">
-                        {fmtDate(selected.lastMs)} · {fmtSize(selected.size)} · {msgs ? shown.length : "…"} messages
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {chatActions(selected, toast.show, msgs)
-                    .filter((a) => a.id === "claude" || a.id === "codex")
-                    .map((a) => (
-                      <Tip key={a.id} label={a.hint}>
-                        <ActionButton action={a} primary={a.id === "claude"} onError={toast.show} />
-                      </Tip>
-                    ))}
-                  <ActionsMenu chat={selected} msgs={msgs} toast={toast.show} />
-                  <div className="ml-auto">
-                    <Tip label={showTools ? "Hide the tool steps" : "Show the tool steps Claude took"}>
-                      <Button
-                        size="icon"
-                        variant={showTools ? "secondary" : "ghost"}
-                        aria-label="Toggle tool steps"
-                        onClick={() => setShowTools((s) => !s)}
-                      >
-                        <Wrench className="size-4" strokeWidth={1.5} />
-                      </Button>
-                    </Tip>
-                  </div>
-                </div>
-              </header>
 
-              <div ref={viewerRef} className="relative min-h-0 flex-1">
-                <ScrollArea className="h-full">
-                  <div className="mx-auto max-w-3xl space-y-4 p-4">
-                    {!msgs && Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)}
-                    {shown.map((m, i) => (
-                      <Message key={i} m={m} />
-                    ))}
-                  </div>
-                </ScrollArea>
-                {showJump && (
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    aria-label="Scroll to the bottom"
-                    className="absolute bottom-4 left-1/2 size-9 -translate-x-1/2 rounded-full bg-background shadow-md"
-                    onClick={() => viewport()?.scrollTo({ top: viewport()!.scrollHeight, behavior: "smooth" })}
-                  >
-                    <ArrowDown className="size-4" />
-                  </Button>
-                )}
-              </div>
-            </>
+          {!selected ? (
+            <OverviewPage
+              overview={overview}
+              accountCount={new Set([...(overview.claude?.accounts ?? []), ...(overview.codex?.accounts ?? [])].map((a) => a.id)).size}
+              onSync={() => setSyncOpen(true)}
+            />
+          ) : (
+            <ChatView
+              chat={named(selected)}
+              page={page}
+              loadingEarlier={loadingEarlier}
+              onLoadEarlier={loadEarlier}
+              onLoadAll={loadAll}
+              showSteps={showSteps}
+              onToggleSteps={() => setShowSteps((s) => !s)}
+              headerOpen={headerOpen}
+              onToggleHeader={() => setHeaderOpen((o) => !o)}
+              pinned={pinSet.has(chatKey(selected))}
+              onTogglePin={() => togglePin(chatKey(selected))}
+              onRename={() => setRenaming(selected)}
+              toast={say}
+            />
           )}
         </main>
 
-        {toast.msg && (
-          <div className="fixed bottom-4 right-4 rounded-lg border bg-popover px-3 py-2 text-sm shadow-md">{toast.msg}</div>
-        )}
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          provider={provider}
+          pinned={pinned}
+          titleOf={(c) => named(c).title}
+          onOpenChat={(c) => {
+            if (c.provider !== provider) setProvider(c.provider);
+            open(c);
+          }}
+          actions={[
+            { id: "overview", label: "Go to the overview", icon: <LayoutDashboard className="size-4" />, run: () => setSelected(null) },
+            { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
+            { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => switchProvider("codex") },
+            { id: "sync", label: "Sync & backup", icon: <DatabaseBackup className="size-4" />, run: () => setSyncOpen(true) },
+            { id: "refresh", label: "Scan this PC for new chats", icon: <RefreshCw className="size-4" />, run: () => void rescan() },
+            { id: "theme", label: dark ? "Switch to the light theme" : "Switch to the dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
+          ]}
+        />
+        <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />
+        <RenameDialog
+          chat={renaming}
+          current={renaming ? (names[chatKey(renaming)] ?? "") : ""}
+          onClose={() => setRenaming(null)}
+          onSave={(name) => {
+            if (renaming) rename(chatKey(renaming), name);
+            setRenaming(null);
+          }}
+        />
+        <Toaster key={String(dark)} position="bottom-right" />
       </div>
     </TooltipProvider>
+  );
+}
+
+function Section({ title, count, open, onOpenChange, action, children }: { title: string; count: number; open: boolean; onOpenChange: (o: boolean) => void; action?: ReactNode; children: ReactNode }) {
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
+      <div className="flex items-center gap-1">
+        <CollapsibleTrigger className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground">
+          <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+          {title}
+          <span className="rounded-full bg-muted px-1.5 text-[10px] font-normal text-muted-foreground">{count.toLocaleString()}</span>
+        </CollapsibleTrigger>
+        {action}
+      </div>
+      <CollapsibleContent className="space-y-0.5">{children}</CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+const SORTS: Record<string, string> = { recent: "Most recent", oldest: "Oldest first", title: "Title A to Z", size: "Largest first" };
+const SCOPES: Record<string, string> = { all: "All", live: "On this PC", backup: "Backup only", archived: "Archived" };
+
+function FiltersMenu({ sort, scope, onSort, onScope, onReset }: { sort: string; scope: string; onSort: (s: string) => void; onScope: (s: string) => void; onReset: () => void }) {
+  const applied = (sort !== "recent" ? 1 : 0) + (scope !== "all" ? 1 : 0);
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <PopoverTrigger render={<Button variant="ghost" size="icon" aria-label="Filters" className="relative size-7 shrink-0 text-muted-foreground" />}>
+              <ListFilter className="size-4" />
+              {applied > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-primary text-[9px] text-primary-foreground">{applied}</span>
+              )}
+            </PopoverTrigger>
+          }
+        />
+        <TooltipContent>Filters</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="end" className="w-64 gap-3 p-3">
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Sort by</p>
+          <Select value={sort} onValueChange={(v) => v && onSort(v)} items={SORTS}>
+            <SelectTrigger className="h-9 w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {Object.entries(SORTS).map(([k, label]) => (
+                <SelectItem key={k} value={k}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Show</p>
+          <div className="grid grid-cols-2 gap-1.5">
+            {Object.entries(SCOPES).map(([k, label]) => (
+              <Toggle key={k} variant="outline" size="sm" pressed={scope === k} onPressedChange={() => onScope(k)} className="w-full">
+                {label}
+              </Toggle>
+            ))}
+          </div>
+        </div>
+        <Button variant="outline" size="sm" disabled={applied === 0} onClick={onReset}>
+          <RotateCcw className="size-3.5" /> Reset filters
+        </Button>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+const ChatRow = memo(function ChatRow({
+  chat,
+  selected,
+  pinned,
+  hit,
+  msgs,
+  extras,
+  onOpen,
+  toast,
+}: {
+  chat: Chat;
+  selected: boolean;
+  pinned: boolean;
+  hit?: string;
+  msgs: Msg[] | null;
+  extras: ChatAction[];
+  onOpen: () => void;
+  toast: (m: string) => void;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => e.key === "Enter" && onOpen()}
+      className={cn("group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted", selected && "border-border bg-muted")}
+    >
+      <div className="flex items-start gap-2.5">
+        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-background">
+          <ProviderLogo provider={chat.provider} className="size-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{chat.title}</span>
+            {pinned && <Pin className="size-3 shrink-0 text-muted-foreground group-hover:hidden" />}
+            {(chat.archived || chat.backup) && <Archive className="size-3.5 shrink-0 text-muted-foreground group-hover:hidden" strokeWidth={1.5} />}
+            <ChatMenu chat={chat} toast={toast} msgs={msgs} extras={extras} />
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="truncate">{chat.project}</span>
+            <span>·</span>
+            <span className="shrink-0">{fmtDate(chat.lastMs)}</span>
+          </div>
+          {hit && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{hit}</p>}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+function OverviewPage({ overview, accountCount, onSync }: { overview: Record<Provider, Overview | null>; accountCount: number; onSync: () => void }) {
+  const latest = Math.max(overview.claude?.latestMs ?? 0, overview.codex?.latestMs ?? 0);
+  const ready = overview.claude !== null && overview.codex !== null;
+  const stats = [
+    { icon: <ProviderLogo provider="claude" className="size-4" />, n: overview.claude?.total.toLocaleString(), label: "Claude chats" },
+    { icon: <ProviderLogo provider="codex" className="size-4" />, n: overview.codex?.total.toLocaleString(), label: "Codex chats" },
+    { icon: <Users className="size-4 text-muted-foreground" strokeWidth={1.5} />, n: ready ? String(accountCount) : undefined, label: "Accounts" },
+    { icon: <Clock className="size-4 text-muted-foreground" strokeWidth={1.5} />, n: ready ? (latest ? fmtDate(latest) : "None") : undefined, label: "Latest activity" },
+  ];
+  return (
+    <div className="flex flex-1 items-center justify-center overflow-auto p-6">
+      <div className="w-full max-w-xl space-y-5 text-center">
+        <div className="mx-auto flex size-12 items-center justify-center rounded-xl bg-muted">
+          <MessagesSquare className="size-6 text-muted-foreground" strokeWidth={1.25} />
+        </div>
+        <div className="space-y-1">
+          <h2 className="text-base font-medium">Pick a chat to read it</h2>
+          <p className="text-sm text-muted-foreground">Chats from Claude Code and Codex, across every account used on this computer, are listed on the left.</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 text-left sm:grid-cols-4">
+          {stats.map((s) => (
+            <div key={s.label} className="rounded-lg border bg-card p-3">
+              <div className="mb-2">{s.icon}</div>
+              <div className="flex h-5 items-center">{s.n === undefined ? <StatSkeleton /> : <p className="truncate text-sm font-medium">{s.n}</p>}</div>
+              <p className="text-xs text-muted-foreground">{s.label}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-start gap-3 rounded-lg border bg-muted/40 p-3 text-left">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-background">
+            <ShieldCheck className="size-4 text-muted-foreground" strokeWidth={1.5} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Your chats stay on your desktop</p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">Private to you. Nothing is uploaded, and only update checks go online.</p>
+          </div>
+        </div>
+
+        <div className="space-y-2 text-left">
+          {[
+            { icon: Search, title: "Search inside chats", text: "Type a word and press Enter to search the full text of every chat." },
+            { icon: Bot, title: "Continue anywhere", text: "Use the three dots on a chat to continue it in Claude Code or Codex, even from another account." },
+            { icon: FileDown, title: "Keep a copy", text: "Save any chat as a Markdown file or a handoff file." },
+          ].map((s) => (
+            <div key={s.title} className="flex items-start gap-3 rounded-lg border p-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                <s.icon className="size-4 text-muted-foreground" strokeWidth={1.5} />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{s.title}</p>
+                <p className="text-xs text-muted-foreground">{s.text}</p>
+              </div>
+            </div>
+          ))}
+          <div className="flex items-start gap-3 rounded-lg border p-3">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+              <DatabaseBackup className="size-4 text-muted-foreground" strokeWidth={1.5} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium">Back up to Documents</p>
+              <p className="text-xs text-muted-foreground">Copy all chats to a folder so they survive a reinstall or sign-out.</p>
+            </div>
+            <Button size="sm" variant="outline" onClick={onSync}>
+              Sync
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -427,80 +731,52 @@ function Tip({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Message({ m }: { m: Msg }) {
-  const [open, setOpen] = useState(false);
-  const time = m.ts ? new Date(m.ts).toLocaleTimeString(undefined, { timeStyle: "short" }) : "";
-
-  if (m.kind === "tool") {
-    return (
-      <div className="flex items-center gap-2 pl-2 text-xs text-muted-foreground">
-        <Wrench className="size-3 shrink-0" strokeWidth={1.5} />
-        <span className="truncate font-mono">{m.text}</span>
-      </div>
-    );
-  }
-  if (m.kind === "summary") {
-    return (
-      <div className="rounded-lg border border-dashed p-3 text-sm">
-        <button className="flex items-center gap-1.5 text-muted-foreground" onClick={() => setOpen((o) => !o)}>
-          {open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-          Earlier part was summarized here
-        </button>
-        {open && <pre className="mt-2 whitespace-pre-wrap font-sans text-xs text-muted-foreground">{m.text}</pre>}
-      </div>
-    );
-  }
-  const isUser = m.role === "user";
-  const long = m.text.length > 1800;
-  const text = long && !open ? m.text.slice(0, 1800) + "…" : m.text;
+function RenameDialog({ chat, current, onClose, onSave }: { chat: Chat | null; current: string; onClose: () => void; onSave: (name: string) => void }) {
+  const [value, setValue] = useState("");
+  useEffect(() => setValue(current || chat?.title || ""), [chat, current]);
   return (
-    <div className={cn("flex", isUser && "justify-end")}>
-      <div className={cn("max-w-[88%] rounded-xl border px-3.5 py-2.5", isUser ? "bg-muted" : "bg-card")}>
-        <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">{isUser ? "You" : "Claude"}</span>
-          <span>{time}</span>
-        </div>
-        <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">{text}</pre>
-        {long && (
-          <button className="mt-1 text-xs text-muted-foreground underline" onClick={() => setOpen((o) => !o)}>
-            {open ? "Show less" : "Show all"}
-          </button>
-        )}
-      </div>
-    </div>
+    <Dialog open={!!chat} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <div className="flex items-start gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+              <Pencil className="size-4 text-muted-foreground" strokeWidth={1.5} />
+            </div>
+            <div className="min-w-0">
+              <DialogTitle className="text-base font-medium">Rename chat</DialogTitle>
+              <DialogDescription>Only ChatVault shows this name. The original chat is not changed.</DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSave(value);
+          }}
+          className="space-y-4"
+        >
+          <Input autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder="Chat name" maxLength={120} />
+          <DialogFooter className="grid grid-cols-3 gap-2 sm:flex">
+            <Button type="button" variant="ghost" disabled={!current} onClick={() => onSave("")}>
+              Reset
+            </Button>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit">Save</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
+const QUICK = ["continue-claude", "continue-codex", "open", "reveal", "copy-md"];
 
-function useRun(onError: (m: string) => void) {
-  const [busy, setBusy] = useState(false);
-  const run = async (fn: () => Promise<void>) => {
-    setBusy(true);
-    try {
-      await fn();
-    } catch (e) {
-      onError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, run };
-}
-
-function ActionButton({ action, primary, onError }: { action: ChatAction; primary?: boolean; onError: (m: string) => void }) {
-  const { busy, run } = useRun(onError);
-  const Icon = action.icon;
-  return (
-    <Button size="sm" variant={primary ? "default" : "outline"} disabled={busy} onClick={() => run(action.run)}>
-      {busy ? <Loader2 className="size-4 animate-spin" /> : <Icon className="size-4" />} {action.label}
-    </Button>
-  );
-}
-
-function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => void; msgs: Msg[] | null }) {
+function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string) => void; msgs: Msg[] | null; extras: ChatAction[] }) {
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const actions = chatActions(chat, toast, msgs).filter((a) => ["claude", "codex", "open", "reveal", "copy-md"].includes(a.id));
+  const actions = [...extras, ...chatActions(chat, toast, msgs).filter((a) => QUICK.includes(a.id))];
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(false);
@@ -511,7 +787,7 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
       window.removeEventListener("resize", close);
     };
   }, [open]);
-  const groups = ["Continue", "Open", "Copy"] as const;
+  const groups = ["Chat", "Continue", "Open", "Copy"] as const;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -520,7 +796,10 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
             variant="ghost"
             size="icon"
             aria-label="Chat actions"
-            className="-my-1 size-7 shrink-0 text-muted-foreground"
+            className={cn(
+              "-my-1 size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+              open && "opacity-100",
+            )}
             onClick={(e) => e.stopPropagation()}
           />
         }
@@ -534,7 +813,7 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
           return (
             <div key={g}>
               {gi > 0 && <Separator className="my-1" />}
-              <p className="px-2 pb-0.5 pt-1.5 text-xs text-muted-foreground">{g}</p>
+              {g !== "Chat" && <p className="px-2 pb-0.5 pt-1.5 text-xs text-muted-foreground">{g}</p>}
               {items.map((a) => {
                 const Icon = a.icon;
                 return (
@@ -565,39 +844,5 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
         })}
       </PopoverContent>
     </Popover>
-  );
-}
-
-function ActionsMenu({ chat, msgs, toast }: { chat: Chat; msgs: Msg[] | null; toast: (m: string) => void }) {
-  const actions = chatActions(chat, toast, msgs).filter((a) => a.id !== "claude" && a.id !== "codex");
-  const groups = ["Continue", "Open", "Copy", "Save"] as const;
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger render={<Button size="sm" variant="outline" />}>
-        <MoreHorizontal className="size-4" /> Actions <ChevronDown className="size-3.5 text-muted-foreground" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-60">
-        {groups.map((g, gi) => {
-          const items = actions.filter((a) => a.group === g);
-          if (!items.length) return null;
-          return (
-            <div key={g}>
-              {gi > 0 && <DropdownMenuSeparator />}
-              <DropdownMenuGroup>
-                <DropdownMenuLabel>{g}</DropdownMenuLabel>
-                {items.map((a) => {
-                  const Icon = a.icon;
-                  return (
-                    <DropdownMenuItem key={a.id} title={a.hint} onClick={() => a.run().catch((e) => toast(String(e)))}>
-                      <Icon className="size-4" strokeWidth={1.5} /> {a.label}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuGroup>
-            </div>
-          );
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }

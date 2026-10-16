@@ -14,7 +14,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+export type Provider = "claude" | "codex";
+
 export type Chat = {
+  provider: Provider;
   id: string;
   localId: string | null;
   title: string;
@@ -28,6 +31,7 @@ export type Chat = {
   path: string;
   model: string | null;
   hasMetadata: boolean;
+  backup: boolean;
 };
 export type Msg = {
   role: "user" | "assistant";
@@ -35,11 +39,8 @@ export type Msg = {
   text: string;
   kind: "text" | "tool" | "summary" | "image";
 };
+export type MsgPage = { messages: Msg[]; total: number; start: number };
 
-export const fmtDate = (ms: number) =>
-  new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-export const fmtSize = (b: number) =>
-  b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 export type AccountInfo = {
   id: string;
   orgs: number;
@@ -49,19 +50,34 @@ export type AccountInfo = {
   name: string | null;
   plan: string | null;
 };
-let accountNames: Record<string, string> = {};
+
+export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex" };
+
+export const fmtDate = (ms: number) =>
+  new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+export const fmtSize = (b: number) =>
+  b > 1073741824
+    ? `${(b / 1073741824).toFixed(1)} GB`
+    : b > 1048576
+      ? `${(b / 1048576).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(b / 1024))} KB`;
+
+let accountEmails: Record<string, string> = {};
 export const setAccountNames = (list: AccountInfo[]) => {
-  accountNames = Object.fromEntries(list.filter((a) => a.email).map((a) => [a.id, a.email as string]));
+  accountEmails = Object.fromEntries(list.filter((a) => a.email).map((a) => [a.id, a.email as string]));
 };
+/** The email when it is known, otherwise the first 8 characters of the account id. */
 export const accountLabel = (a: string) =>
-  a === "unknown" ? "No account info" : (accountNames[a] ?? `Account ${a.slice(0, 8)}`);
+  a === "unknown" ? "Unknown account" : (accountEmails[a] ?? `Account ${a.slice(0, 8)}`);
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 export function toMarkdown(chat: Chat, msgs: Msg[]) {
+  const who = chat.provider === "claude" ? "Claude" : "Codex";
   const lines = [
     `# ${chat.title}`,
     "",
+    `- Tool: ${PROVIDER_NAME[chat.provider]}`,
     `- Account: ${accountLabel(chat.account)}`,
     `- Project: ${chat.project}`,
     `- Last activity: ${fmtDate(chat.lastMs)}`,
@@ -69,7 +85,7 @@ export function toMarkdown(chat: Chat, msgs: Msg[]) {
   ];
   for (const m of msgs) {
     if (m.kind === "tool") continue;
-    lines.push(`## ${m.role === "user" ? "You" : "Claude"} · ${m.ts ? fmtDate(Date.parse(m.ts)) : ""}`, "", m.text, "");
+    lines.push(`## ${m.role === "user" ? "You" : who} · ${m.ts ? fmtDate(Date.parse(m.ts)) : ""}`, "", m.text, "");
   }
   return lines.join("\n");
 }
@@ -105,7 +121,7 @@ export function buildHandoff(chat: Chat, msgs: Msg[]) {
   return [
     `# Handoff: ${chat.title}`,
     "",
-    "You are continuing work that was started in a Claude Code chat, possibly under a different account.",
+    `You are continuing work that was started in a ${PROVIDER_NAME[chat.provider]} chat, possibly under a different account.`,
     "Read everything below, keep the user's rules and conventions, and carry on from the last request at the bottom.",
     "Do not redo work that the transcript says is finished. Check the repository state before you change code.",
     "",
@@ -120,72 +136,114 @@ export function buildHandoff(chat: Chat, msgs: Msg[]) {
   ].join("\n");
 }
 
-export async function loadMsgs(chat: Chat) {
-  return invoke<Msg[]>("read_chat", { path: chat.path });
-}
+export const loadAll = (chat: Chat) => invoke<Msg[]>("read_chat_all", { provider: chat.provider, path: chat.path });
 
 async function prepareHandoff(chat: Chat) {
-  const msgs = await loadMsgs(chat);
+  const msgs = await loadAll(chat);
   return invoke<string>("save_handoff", { title: chat.title, content: buildHandoff(chat, msgs) });
 }
 
-const codexCommand = (path: string) =>
-  `codex 'Read the file ${path} completely. It is the transcript of an earlier Claude Code session on this project. Continue the work from exactly where it stopped, and follow the project rules it mentions.'`;
+const HANDOFF_PROMPT =
+  "It is the transcript of an earlier AI coding session on this project. Continue the work from exactly where it stopped, and follow the project rules it mentions.";
+const codexHandoffCommand = (path: string) => `codex 'Read the file ${path} completely. ${HANDOFF_PROMPT}'`;
+const claudeHandoffCommand = (path: string) => {
+  const folder = path.replace(/[\\/][^\\/]*$/, "");
+  return `claude --add-dir '${folder}' 'Read the file ${path} completely. ${HANDOFF_PROMPT}'`;
+};
 
 export type ChatAction = {
   id: string;
   label: string;
   hint: string;
   icon: LucideIcon;
-  group: "Continue" | "Open" | "Copy" | "Save";
+  group: "Chat" | "Continue" | "Open" | "Copy" | "Save";
+  /** 1 and 2 are the two buttons shown in the chat header. */
+  slot?: 1 | 2;
   run: () => Promise<void>;
 };
 
 type Toast = (m: string) => void;
 
 export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatAction[] {
-  const msgsOrLoad = async () => msgs ?? (await loadMsgs(chat));
+  const isClaude = chat.provider === "claude";
+  const cd = chat.cwd ? `cd "${chat.cwd}"; ` : "";
+  const allMsgs = async () => (msgs && msgs.length ? msgs : await loadAll(chat));
   const copy = async (text: string, what: string) => {
     await navigator.clipboard.writeText(text);
     toast(`${what} copied`);
   };
+  const launch = (agent: string, extra: Record<string, unknown> = {}) =>
+    invoke("launch_agent", { agent, id: chat.id, cwd: chat.cwd, ...extra });
+
+  const continueClaude: ChatAction = isClaude
+    ? {
+        id: "continue-claude",
+        label: "Continue in Claude",
+        hint: "Opens a terminal and resumes this chat with Claude Code, using the account signed in there.",
+        icon: Sparkles,
+        group: "Continue",
+        slot: 1,
+        run: async () => {
+          await launch("claude");
+          toast("Starting Claude Code in a terminal");
+        },
+      }
+    : {
+        id: "continue-claude",
+        label: "Continue in Claude",
+        hint: "Saves a handoff file with this Codex chat and starts Claude Code with it, so Claude keeps the context.",
+        icon: Sparkles,
+        group: "Continue",
+        slot: 2,
+        run: async () => {
+          const handoff = await prepareHandoff(chat);
+          await launch("claude-handoff", { handoff });
+          toast("Starting Claude Code in a terminal");
+        },
+      };
+  const continueCodex: ChatAction = isClaude
+    ? {
+        id: "continue-codex",
+        label: "Continue in Codex",
+        hint: "Saves a handoff file with this Claude chat and starts Codex with it, so Codex keeps the context.",
+        icon: Bot,
+        group: "Continue",
+        slot: 2,
+        run: async () => {
+          const handoff = await prepareHandoff(chat);
+          await launch("codex-handoff", { handoff });
+          toast("Starting Codex in a terminal");
+        },
+      }
+    : {
+        id: "continue-codex",
+        label: "Continue in Codex",
+        hint: "Opens a terminal and resumes this chat with Codex.",
+        icon: Bot,
+        group: "Continue",
+        slot: 1,
+        run: async () => {
+          await launch("codex-resume");
+          toast("Starting Codex in a terminal");
+        },
+      };
+
   const list: ChatAction[] = [
+    continueClaude,
+    continueCodex,
     {
-      id: "claude",
-      label: "Continue in Claude",
-      hint: "Opens a terminal and resumes this chat with Claude Code, using the account signed in there.",
-      icon: Sparkles,
-      group: "Continue",
-      run: async () => {
-        await invoke("launch_agent", { agent: "claude", id: chat.id, cwd: chat.cwd });
-        toast("Starting Claude Code in a terminal");
-      },
-    },
-    {
-      id: "claude-fork",
-      label: "Continue in Claude (copy)",
-      hint: "Resumes as a new copy, so the original chat file is left untouched. Good when the chat belongs to another account.",
+      id: "fork",
+      label: isClaude ? "Continue in Claude (copy)" : "Continue in Codex (copy)",
+      hint: "Resumes as a new copy, so the original chat file is left untouched.",
       icon: GitFork,
       group: "Continue",
       run: async () => {
-        await invoke("launch_agent", { agent: "claude-fork", id: chat.id, cwd: chat.cwd });
-        toast("Starting a copy in Claude Code");
-      },
-    },
-    {
-      id: "codex",
-      label: "Continue in Codex",
-      hint: "Saves a handoff file with the whole chat and starts Codex with it, so Codex keeps the context.",
-      icon: Bot,
-      group: "Continue",
-      run: async () => {
-        const handoff = await prepareHandoff(chat);
-        await invoke("launch_agent", { agent: "codex", id: chat.id, cwd: chat.cwd, handoff });
-        toast("Starting Codex in a terminal");
+        await launch(isClaude ? "claude-fork" : "codex-fork");
+        toast(`Starting a copy in ${isClaude ? "Claude Code" : "Codex"}`);
       },
     },
   ];
-  if (chat.localId) {
+  if (isClaude && chat.localId) {
     list.push({
       id: "open",
       label: "Open in Claude app",
@@ -195,27 +253,25 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       run: () => invoke("open_in_claude", { localId: chat.localId }),
     });
   }
-  list.push(
-    {
-      id: "reveal",
-      label: "Show transcript file",
-      hint: "Shows the transcript file in File Explorer.",
-      icon: FolderOpen,
+  list.push({
+    id: "reveal",
+    label: "Show transcript file",
+    hint: "Shows the transcript file in File Explorer.",
+    icon: FolderOpen,
+    group: "Open",
+    run: () => invoke("reveal_in_folder", { path: chat.path }),
+  });
+  if (chat.cwd) {
+    list.push({
+      id: "folder",
+      label: "Open project folder",
+      hint: "Opens the folder this chat worked in.",
+      icon: FolderTree,
       group: "Open",
-      run: () => invoke("reveal_in_folder", { path: chat.path }),
-    },
-    ...(chat.cwd
-      ? [
-          {
-            id: "folder",
-            label: "Open project folder",
-            hint: "Opens the folder this chat worked in.",
-            icon: FolderTree,
-            group: "Open" as const,
-            run: () => invoke<void>("open_folder", { path: chat.cwd }),
-          },
-        ]
-      : []),
+      run: () => invoke<void>("open_folder", { path: chat.cwd }),
+    });
+  }
+  list.push(
     {
       id: "copy-id",
       label: "Copy chat ID",
@@ -225,22 +281,22 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       run: () => copy(chat.id, "Chat ID"),
     },
     {
-      id: "copy-claude",
-      label: "Copy Claude command",
-      hint: "A PowerShell command that resumes this chat with Claude Code.",
+      id: "copy-native",
+      label: isClaude ? "Copy Claude command" : "Copy Codex command",
+      hint: "A PowerShell command that resumes this chat.",
       icon: Terminal,
       group: "Copy",
-      run: () => copy(`${chat.cwd ? `cd "${chat.cwd}"; ` : ""}claude --resume ${chat.id}`, "Claude command"),
+      run: () => copy(`${cd}${isClaude ? "claude --resume" : "codex resume"} ${chat.id}`, "Command"),
     },
     {
-      id: "copy-codex",
-      label: "Copy Codex command",
-      hint: "Saves the handoff file and copies the command that starts Codex with it.",
+      id: "copy-other",
+      label: isClaude ? "Copy Codex command" : "Copy Claude command",
+      hint: "Saves the handoff file and copies the command that starts the other tool with it.",
       icon: Terminal,
       group: "Copy",
       run: async () => {
         const handoff = await prepareHandoff(chat);
-        await copy(`${chat.cwd ? `cd "${chat.cwd}"; ` : ""}${codexCommand(handoff)}`, "Codex command");
+        await copy(`${cd}${isClaude ? codexHandoffCommand(handoff) : claudeHandoffCommand(handoff)}`, "Command");
       },
     },
     {
@@ -249,7 +305,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       hint: "Copies the readable conversation.",
       icon: Copy,
       group: "Copy",
-      run: async () => copy(toMarkdown(chat, await msgsOrLoad()), "Chat"),
+      run: async () => copy(toMarkdown(chat, await allMsgs()), "Chat"),
     },
     {
       id: "save-md",
@@ -258,7 +314,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       icon: FileDown,
       group: "Save",
       run: async () => {
-        await invoke("save_markdown", { title: chat.title, markdown: toMarkdown(chat, await msgsOrLoad()) });
+        await invoke("save_markdown", { title: chat.title, markdown: toMarkdown(chat, await allMsgs()) });
         toast("Saved to Desktop / Claude Chats");
       },
     },
