@@ -10,6 +10,8 @@ import {
   Trash2,
   ArrowUpDown,
   ListFilter,
+  PanelLeftClose,
+  PanelLeftOpen,
   RotateCcw,
   LayoutDashboard,
   Loader2,
@@ -75,6 +77,7 @@ export default function App() {
   const [sort, setSort] = usePersisted("chatvault.sort", "recent");
   const [scope, setScope] = usePersisted("chatvault.scope", "all");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = usePersisted("chatvault.sidebar", true);
   const [headerOpen, setHeaderOpen] = usePersisted("chatvault.headerOpen", true);
   const [pinnedOpen, setPinnedOpen] = usePersisted("chatvault.sec.pinned", true);
   const [recentOpen, setRecentOpen] = usePersisted("chatvault.sec.recent", true);
@@ -347,7 +350,6 @@ export default function App() {
     />
   );
 
-  const cmeta = `${((overview.claude?.total ?? 0) + (overview.codex?.total ?? 0)).toLocaleString()} chats on this PC`;
 
   const controls = (
     <>
@@ -379,20 +381,30 @@ export default function App() {
     <TooltipProvider delay={200}>
       <div className="flex h-screen bg-background text-foreground">
         {/* Sidebar */}
-        <aside className="flex w-[360px] shrink-0 flex-col border-r">
-          <button
-            onClick={() => setSelected(null)}
-            className="flex items-center gap-2 p-3 text-left transition hover:bg-muted/60"
-            title="Back to the overview"
-          >
-            <AppLogo className="size-8 shrink-0 rounded-lg" />
-            <div className="min-w-0 flex-1">
-              <h1 className="text-base font-medium leading-tight">ChatVault</h1>
-              <p className="truncate text-xs text-muted-foreground">
-                {indexing ? (indexing.total ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()}` : "Scanning this PC…") : cmeta}
-              </p>
-            </div>
-          </button>
+        <aside className={cn("flex shrink-0 flex-col overflow-hidden border-r transition-[width] duration-300 ease-in-out", sidebarOpen ? "w-[360px]" : "w-[68px]")}>
+          <div className="flex shrink-0 items-center gap-1 p-3">
+            <Tip label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}>
+              <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" aria-label="Toggle sidebar" onClick={() => setSidebarOpen((o) => !o)}>
+                {sidebarOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+              </Button>
+            </Tip>
+            <button
+              onClick={() => setSelected(null)}
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-xl p-1 text-left transition hover:bg-muted/60"
+              title="Back to the overview"
+            >
+              <AppLogo className="size-9 shrink-0 rounded-xl ring-1 ring-border" />
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-medium leading-tight">ChatVault</h1>
+                {indexing && (
+                  <p className="truncate text-xs text-muted-foreground">
+                    {indexing.total ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()}` : "Scanning this PC…"}
+                  </p>
+                )}
+              </div>
+            </button>
+          </div>
+          <div className={cn("flex min-h-0 w-[360px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
 
           <div className="space-y-2 px-3 pb-2">
             <Tabs value={provider} onValueChange={(v) => switchProvider(v as Provider)}>
@@ -507,6 +519,7 @@ export default function App() {
               </Section>
             </div>
           </ScrollArea>
+          </div>
         </aside>
 
         {/* Content */}
@@ -521,6 +534,7 @@ export default function App() {
           {!selected ? (
             <OverviewPage
               actions={controls}
+              userName={accountInfo.find((a) => a.cliCurrent)?.name ?? undefined}
               overview={overview}
               accountCount={new Set([...(overview.claude?.accounts ?? []), ...(overview.codex?.accounts ?? [])].map((a) => a.id)).size}
               reloadKey={reloadKey}

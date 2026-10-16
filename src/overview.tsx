@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { cn } from "@/lib/utils";
 import { ArrowUpRight, CalendarDays, DatabaseBackup, FolderOpen, HardDrive, LayoutDashboard, MessagesSquare, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -22,6 +23,14 @@ const DAYS = 14;
 const CLAUDE = "#D97757";
 const CODEX = "#7a9dff";
 const CURSOR = "#2dd4bf";
+
+function greeting() {
+  const h = new Date().getHours();
+  if (h < 5) return "Working late";
+  if (h < 12) return "Good morning";
+  if (h < 18) return "Good afternoon";
+  return "Good evening";
+}
 
 function when(ms: number) {
   const d = new Date(ms);
@@ -64,6 +73,7 @@ export function OverviewPage({
   onSync,
   onSearch,
   actions,
+  userName,
 }: {
   overview: Record<Provider, Overview | null>;
   accountCount: number;
@@ -73,6 +83,7 @@ export function OverviewPage({
   onSync: () => void;
   onSearch: () => void;
   actions?: ReactNode;
+  userName?: string;
 }) {
   const [recent, setRecent] = useState<Chat[] | null>(null);
   const [backup, setBackup] = useState<Backup | null>(null);
@@ -114,6 +125,8 @@ export function OverviewPage({
   }, [stats]);
   const max = Math.max(1, ...days.map((d) => d.total));
   const week = days.slice(-7).reduce((n, d) => n + d.total, 0);
+  const before = days.slice(0, 7).reduce((n, d) => n + d.total, 0);
+  const delta = before > 0 ? Math.round(((week - before) / before) * 100) : null;
   const topProject = stats?.projects[0]?.count ?? 1;
 
   const cards = [
@@ -133,9 +146,14 @@ export function OverviewPage({
               <LayoutDashboard className="size-5 text-muted-foreground" strokeWidth={1.5} />
             </div>
             <div className="min-w-0 flex-1">
-              <h2 className="text-base font-medium leading-tight">Overview</h2>
+              <h2 className="text-base font-medium leading-tight">
+                {greeting()}
+                {userName ? `, ${userName}` : ""}
+              </h2>
               <p className="text-sm text-muted-foreground">
-                {ready ? `${total.toLocaleString()} chats from ${accountCount} accounts on this computer` : "Looking for chats on this computer…"}
+                {ready
+                  ? `${total.toLocaleString()} chats across ${accountCount} accounts${stats ? `, ${week.toLocaleString()} active this week` : ""}`
+                  : "Looking for chats on this computer…"}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">{actions}</div>
@@ -157,53 +175,87 @@ export function OverviewPage({
             <div className="space-y-4 lg:col-span-3">
               <Card
                 title="Activity"
-                hint={`Chats you used each day, last ${DAYS} days`}
+                hint="Chats you used each day"
                 action={
                   <div className="flex items-center gap-3 pt-0.5 text-xs text-muted-foreground">
-                    <span className="flex items-center gap-1.5">
-                      <span className="size-2 rounded-full" style={{ background: CLAUDE }} /> Claude
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="size-2 rounded-full" style={{ background: CODEX }} /> Codex
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="size-2 rounded-full" style={{ background: CURSOR }} /> Cursor
-                    </span>
+                    {[
+                      ["Claude", CLAUDE],
+                      ["Codex", CODEX],
+                      ["Cursor", CURSOR],
+                    ].map(([name, color]) => (
+                      <span key={name} className="flex items-center gap-1.5">
+                        <span className="size-2 rounded-full" style={{ background: color }} /> {name}
+                      </span>
+                    ))}
                   </div>
                 }
               >
-                <div className="px-4 pb-3 pt-4">
+                <div className="px-4 pb-4 pt-3">
                   {stats === null ? (
-                    <Skeleton className="h-28 w-full" />
+                    <Skeleton className="h-44 w-full" />
                   ) : (
                     <>
-                      <div className="flex h-28 items-end gap-1.5">
-                        {days.map((d) => (
-                          <Tooltip key={d.date.toISOString()}>
-                            <TooltipTrigger
-                              render={
-                                <div className="flex h-full min-w-0 flex-1 cursor-default flex-col justify-end">
-                                  {d.total === 0 ? (
-                                    <div className="h-1 rounded-full bg-muted" />
-                                  ) : (
-                                    <div className="flex flex-col-reverse overflow-hidden rounded-md" style={{ height: `${Math.max(8, (d.total / max) * 100)}%` }}>
-                                      <div style={{ flex: d.claude, background: CLAUDE }} />
-                                      <div style={{ flex: d.codex, background: CODEX }} />
-                                      <div style={{ flex: d.cursor, background: CURSOR }} />
-                                    </div>
-                                  )}
-                                </div>
-                              }
-                            />
-                            <TooltipContent>
-                              {d.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}: {d.claude} Claude, {d.codex} Codex, {d.cursor} Cursor
-                            </TooltipContent>
-                          </Tooltip>
-                        ))}
+                      <div className="mb-4 flex items-end gap-2">
+                        <p className="text-2xl font-medium leading-none tracking-tight">{week.toLocaleString()}</p>
+                        <p className="text-xs text-muted-foreground">chats in the last 7 days</p>
+                        {delta !== null && (
+                          <span
+                            className={cn(
+                              "ml-auto rounded-full px-2 py-0.5 text-xs",
+                              delta >= 0 ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : "bg-destructive/10 text-destructive",
+                            )}
+                          >
+                            {delta >= 0 ? "↑" : "↓"} {Math.abs(delta)}% vs the week before
+                          </span>
+                        )}
                       </div>
-                      <div className="mt-1.5 flex justify-between text-[10px] text-muted-foreground">
-                        <span>{days[0].date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
-                        <span>Today</span>
+                      <div className="relative h-32">
+                        <div className="pointer-events-none absolute inset-0 flex flex-col justify-between">
+                          {[max, Math.round(max / 2), 0].map((v, i) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <span className="w-6 text-right text-[10px] tabular-nums text-muted-foreground">{v}</span>
+                              <div className="h-px flex-1 bg-border/70" />
+                            </div>
+                          ))}
+                        </div>
+                        <div className="absolute inset-0 flex items-end gap-1.5 pl-8">
+                          {days.map((d, i) => {
+                            const today = i === days.length - 1;
+                            return (
+                              <Tooltip key={d.date.toISOString()}>
+                                <TooltipTrigger
+                                  render={
+                                    <div className="flex h-full min-w-0 flex-1 cursor-default flex-col justify-end">
+                                      {d.total === 0 ? (
+                                        <div className="h-0.5 rounded-full bg-muted-foreground/30" />
+                                      ) : (
+                                        <div
+                                          className={cn("flex flex-col-reverse overflow-hidden rounded-t-md transition hover:brightness-110", !today && "opacity-90")}
+                                          style={{ height: `${Math.max(6, (d.total / max) * 100)}%` }}
+                                        >
+                                          <div style={{ flex: d.claude, background: CLAUDE }} />
+                                          <div style={{ flex: d.codex, background: CODEX }} />
+                                          <div style={{ flex: d.cursor, background: CURSOR }} />
+                                        </div>
+                                      )}
+                                    </div>
+                                  }
+                                />
+                                <TooltipContent>
+                                  {d.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}: {d.claude} Claude, {d.codex} Codex, {d.cursor} Cursor
+                                </TooltipContent>
+                              </Tooltip>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="mt-2 flex gap-1.5 pl-8">
+                        {days.map((d, i) => (
+                          <div key={d.date.toISOString()} className="flex min-w-0 flex-1 flex-col items-center text-[10px] leading-tight text-muted-foreground">
+                            <span className={cn(i === days.length - 1 && "font-medium text-foreground")}>{d.date.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 2)}</span>
+                            <span className={cn(i === days.length - 1 && "font-medium text-foreground")}>{d.date.getDate()}</span>
+                          </div>
+                        ))}
                       </div>
                     </>
                   )}
@@ -247,23 +299,41 @@ export function OverviewPage({
             </div>
 
             <div className="space-y-4 lg:col-span-2">
-              <Card title="Busiest projects" hint="Where most of your chats happen">
-                <div className="space-y-3 px-4 pb-4 pt-3">
+              <Card title="Busiest projects" hint={stats ? `Your ${Math.min(5, stats.projects.length)} most-used folders` : undefined}>
+                <ol className="space-y-0.5 p-2 pt-2">
                   {stats === null
-                    ? Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)
-                    : stats.projects.slice(0, 5).map((p) => (
-                        <div key={p.name} className="space-y-1.5">
-                          <div className="flex items-center gap-2 text-sm">
-                            <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />
-                            <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                            <span className="text-xs tabular-nums text-muted-foreground">{p.count.toLocaleString()}</span>
+                    ? Array.from({ length: 5 }).map((_, i) => (
+                        <li key={i} className="flex items-center gap-3 px-2 py-2">
+                          <Skeleton className="size-6 rounded-md" />
+                          <div className="flex-1 space-y-2">
+                            <Skeleton className="h-3.5 w-3/4" />
+                            <Skeleton className="h-1.5 w-full" />
                           </div>
-                          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                            <div className="h-full rounded-full bg-foreground/70" style={{ width: `${Math.max(4, (p.count / topProject) * 100)}%` }} />
-                          </div>
-                        </div>
-                      ))}
-                </div>
+                        </li>
+                      ))
+                    : stats.projects.slice(0, 5).map((p, i) => {
+                        const pct = total ? Math.round((p.count / total) * 100) : 0;
+                        return (
+                          <li key={p.name} className="flex items-center gap-3 rounded-lg px-2 py-2 transition hover:bg-muted/60">
+                            <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium text-muted-foreground">{i + 1}</span>
+                            <div className="min-w-0 flex-1 space-y-1.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+                                  <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                                  <span className="truncate">{p.name}</span>
+                                </span>
+                                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                                  {p.count.toLocaleString()} · {pct}%
+                                </span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                                <div className="h-full rounded-full bg-foreground/80" style={{ width: `${Math.max(4, (p.count / topProject) * 100)}%` }} />
+                              </div>
+                            </div>
+                          </li>
+                        );
+                      })}
+                </ol>
               </Card>
 
               <Card title="Backup">
