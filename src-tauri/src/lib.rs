@@ -79,6 +79,13 @@ async fn provider_overview(provider: String) -> Result<Overview, String> {
 }
 
 #[tauri::command]
+async fn overview_stats(days: i64) -> Result<index::Stats, String> {
+    tauri::async_runtime::spawn_blocking(move || index::stats(days.clamp(1, 90)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn chats_by_ids(provider: String, ids: Vec<String>) -> Result<Vec<ChatSummary>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || index::by_ids(&provider, &ids[..ids.len().min(300)]))
@@ -415,6 +422,7 @@ pub fn run() {
             query_chats,
             provider_overview,
             chats_by_ids,
+            overview_stats,
             read_chat_page,
             read_chat_all,
             deep_search,

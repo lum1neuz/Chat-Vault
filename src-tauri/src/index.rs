@@ -571,3 +571,58 @@ pub fn forget(path: &str) -> Result<(), String> {
     c.execute("DELETE FROM chats WHERE path=?1", params![path]).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[derive(Serialize)]
+pub struct DayCount {
+    pub day: String,
+    pub provider: String,
+    pub count: i64,
+}
+
+#[derive(Serialize)]
+pub struct NameCount {
+    pub name: String,
+    pub count: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    pub daily: Vec<DayCount>,
+    pub projects: Vec<NameCount>,
+    pub size_claude: i64,
+    pub size_codex: i64,
+}
+
+/// Activity for the overview page: chats per day, busiest projects and disk use.
+pub fn stats(days: i64) -> Result<Stats, String> {
+    let c = open_db()?;
+    let since = chrono_now_ms() - days * 86_400_000;
+    let mut st = c
+        .prepare("SELECT date(last_ms/1000,'unixepoch','localtime') d, provider, COUNT(*) FROM chats WHERE last_ms>=?1 GROUP BY d, provider")
+        .map_err(|e| e.to_string())?;
+    let daily = st
+        .query_map(params![since], |r| Ok(DayCount { day: r.get(0)?, provider: r.get(1)?, count: r.get(2)? }))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    let mut st = c
+        .prepare("SELECT project, COUNT(*) n FROM chats GROUP BY project ORDER BY n DESC, project LIMIT 6")
+        .map_err(|e| e.to_string())?;
+    let projects = st
+        .query_map([], |r| Ok(NameCount { name: r.get(0)?, count: r.get(1)? }))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    let size = |p: &str| -> i64 {
+        c.query_row("SELECT COALESCE(SUM(size),0) FROM chats WHERE provider=?1", params![p], |r| r.get(0)).unwrap_or(0)
+    };
+    Ok(Stats { daily, projects, size_claude: size("claude"), size_codex: size("codex") })
+}
+
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
