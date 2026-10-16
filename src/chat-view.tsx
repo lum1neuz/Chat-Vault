@@ -25,7 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "@/components/ui/message";
+import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -513,15 +513,26 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
 
   return (
     <Message align={isUser ? "end" : "start"}>
-      <MessageAvatar className="self-start group-has-data-[slot=message-footer]/message:translate-y-0">
+      <MessageAvatar className="self-start ">
         <Avatar size="sm">
           <AvatarFallback className="bg-muted">{isUser ? <User className="size-3.5" /> : <ProviderLogo provider={provider} className="size-4" />}</AvatarFallback>
         </Avatar>
       </MessageAvatar>
       <MessageContent>
-        <MessageHeader className={cn("gap-2", isUser && "justify-end")}>
+        <MessageHeader className={cn("gap-2", isUser && "flex-row-reverse")}>
           <span className="text-foreground">{who}</span>
           <span className="font-normal">{time}</span>
+          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/message:opacity-100 focus-within:opacity-100">
+            <MiniAction label={copied === "text" ? "Copied" : "Copy message"} onClick={() => copy("text", m.text)}>
+              {copied === "text" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </MiniAction>
+            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** Â· ${time}\n\n${m.text}`)}>
+              {copied === "md" ? <Check className="size-3.5" /> : <FileText className="size-3.5" />}
+            </MiniAction>
+            <MiniAction label={copied === "quote" ? "Copied" : "Copy as quote"} onClick={() => copy("quote", m.text.split("\n").map((l) => `> ${l}`).join("\n"))}>
+              {copied === "quote" ? <Check className="size-3.5" /> : <Quote className="size-3.5" />}
+            </MiniAction>
+          </div>
         </MessageHeader>
         <Bubble variant={isUser ? "secondary" : "outline"} className={cn("max-w-full", isCurrentMatch && "*:data-[slot=bubble-content]:ring-2 *:data-[slot=bubble-content]:ring-primary/60")}>
           <BubbleContent className="overflow-visible">
@@ -533,19 +544,6 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
             )}
           </BubbleContent>
         </Bubble>
-        <MessageFooter className={cn("px-1", isUser && "justify-end")}>
-          <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/message:opacity-100 focus-within:opacity-100">
-            <MiniAction label={copied === "text" ? "Copied" : "Copy message"} onClick={() => copy("text", m.text)}>
-              {copied === "text" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            </MiniAction>
-            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** Â· ${time}\n\n${m.text}`)}>
-              {copied === "md" ? <Check className="size-3.5" /> : <FileText className="size-3.5" />}
-            </MiniAction>
-            <MiniAction label={copied === "quote" ? "Copied" : "Copy as quote"} onClick={() => copy("quote", m.text.split("\n").map((l) => `> ${l}`).join("\n"))}>
-              {copied === "quote" ? <Check className="size-3.5" /> : <Quote className="size-3.5" />}
-            </MiniAction>
-          </div>
-        </MessageFooter>
       </MessageContent>
     </Message>
   );
