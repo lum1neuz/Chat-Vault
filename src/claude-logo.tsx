@@ -54,6 +54,32 @@ export function CodexLogo({ className }: { className?: string }) {
   );
 }
 
+/** Cursor's cube mark. */
+export function CursorLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" fill="none">
+      <path d="M12 2.5 20.5 7.5v9L12 21.5 3.5 16.5v-9z" fill="currentColor" />
+      <path d="M12 12 20.5 7.5M12 12v9.5M12 12 3.5 7.5" stroke="var(--background)" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** The ChatVault app icon. */
+export function AppLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 1024 1024" className={className} aria-hidden="true">
+      <rect width="1024" height="1024" rx="230" fill="#18181b" />
+      <rect x="196" y="230" width="632" height="410" rx="110" fill="#fafafa" />
+      <polygon points="330,610 330,800 500,630" fill="#fafafa" />
+      <circle cx="352" cy="435" r="44" fill="#18181b" />
+      <circle cx="512" cy="435" r="44" fill="#18181b" />
+      <circle cx="672" cy="435" r="44" fill="#18181b" />
+    </svg>
+  );
+}
+
 export function ProviderLogo({ provider, className }: { provider: Provider; className?: string }) {
-  return provider === "claude" ? <ClaudeLogo className={className} /> : <CodexLogo className={className} />;
+  if (provider === "claude") return <ClaudeLogo className={className} />;
+  if (provider === "codex") return <CodexLogo className={className} />;
+  return <CursorLogo className={className} />;
 }

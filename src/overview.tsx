@@ -4,7 +4,7 @@ import { ArrowUpRight, CalendarDays, DatabaseBackup, FolderOpen, HardDrive, Layo
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProviderLogo } from "@/claude-logo";
-import { fmtSize, type Chat, type Provider } from "@/chat-actions";
+import { PROVIDERS, fmtSize, type Chat, type Provider } from "@/chat-actions";
 import { ChatRowSkeleton } from "@/skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -15,11 +15,13 @@ type Stats = {
   projects: { name: string; count: number }[];
   sizeClaude: number;
   sizeCodex: number;
+  sizeCursor?: number;
 };
 
 const DAYS = 14;
 const CLAUDE = "#D97757";
 const CODEX = "#7a9dff";
+const CURSOR = "#2dd4bf";
 
 function when(ms: number) {
   const d = new Date(ms);
@@ -61,6 +63,7 @@ export function OverviewPage({
   onOpenChat,
   onSync,
   onSearch,
+  actions,
 }: {
   overview: Record<Provider, Overview | null>;
   accountCount: number;
@@ -69,6 +72,7 @@ export function OverviewPage({
   onOpenChat: (c: Chat) => void;
   onSync: () => void;
   onSearch: () => void;
+  actions?: ReactNode;
 }) {
   const [recent, setRecent] = useState<Chat[] | null>(null);
   const [backup, setBackup] = useState<Backup | null>(null);
@@ -77,11 +81,11 @@ export function OverviewPage({
   useEffect(() => {
     let stale = false;
     Promise.all(
-      (["claude", "codex"] as Provider[]).map((p) =>
+      PROVIDERS.map((p) =>
         invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q: "", offset: 0, limit: 5 }).then((r) => r.items),
       ),
     )
-      .then(([a, b]) => !stale && setRecent([...a, ...b].sort((x, y) => y.lastMs - x.lastMs).slice(0, 5)))
+      .then((all) => !stale && setRecent(all.flat().sort((x, y) => y.lastMs - x.lastMs).slice(0, 5)))
       .catch(() => !stale && setRecent([]));
     invoke<Backup>("backup_status").then((b) => !stale && setBackup(b)).catch(() => {});
     invoke<Stats>("overview_stats", { days: DAYS }).then((s) => !stale && setStats(s)).catch(() => {});
@@ -90,22 +94,22 @@ export function OverviewPage({
     };
   }, [reloadKey]);
 
-  const ready = overview.claude !== null && overview.codex !== null;
-  const total = (overview.claude?.total ?? 0) + (overview.codex?.total ?? 0);
+  const ready = overview.claude !== null && overview.codex !== null && overview.cursor !== null;
+  const total = (overview.claude?.total ?? 0) + (overview.codex?.total ?? 0) + (overview.cursor?.total ?? 0);
 
   // One column per day, oldest first, with a count for each tool.
   const days = useMemo(() => {
-    const map = new Map<string, { claude: number; codex: number }>();
+    const map = new Map<string, { claude: number; codex: number; cursor: number }>();
     stats?.daily.forEach((d) => {
-      const e = map.get(d.day) ?? { claude: 0, codex: 0 };
+      const e = map.get(d.day) ?? { claude: 0, codex: 0, cursor: 0 };
       e[d.provider] += d.count;
       map.set(d.day, e);
     });
     return Array.from({ length: DAYS }, (_, i) => {
       const date = new Date();
       date.setDate(date.getDate() - (DAYS - 1 - i));
-      const e = map.get(dayKey(date)) ?? { claude: 0, codex: 0 };
-      return { date, ...e, total: e.claude + e.codex };
+      const e = map.get(dayKey(date)) ?? { claude: 0, codex: 0, cursor: 0 };
+      return { date, ...e, total: e.claude + e.codex + e.cursor };
     });
   }, [stats]);
   const max = Math.max(1, ...days.map((d) => d.total));
@@ -116,6 +120,7 @@ export function OverviewPage({
     { icon: <CalendarDays className="size-4 text-muted-foreground" strokeWidth={1.5} />, value: stats ? week.toLocaleString() : undefined, label: "Active this week" },
     { icon: <ProviderLogo provider="claude" className="size-4" />, value: overview.claude?.total.toLocaleString(), label: "Claude chats" },
     { icon: <ProviderLogo provider="codex" className="size-4" />, value: overview.codex?.total.toLocaleString(), label: "Codex chats" },
+    { icon: <ProviderLogo provider="cursor" className="size-4" />, value: overview.cursor?.total.toLocaleString(), label: "Cursor chats" },
     { icon: <HardDrive className="size-4 text-muted-foreground" strokeWidth={1.5} />, value: stats ? fmtSize(stats.sizeClaude + stats.sizeCodex) : undefined, label: "Stored on this PC" },
   ];
 
@@ -127,15 +132,16 @@ export function OverviewPage({
             <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted">
               <LayoutDashboard className="size-5 text-muted-foreground" strokeWidth={1.5} />
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <h2 className="text-base font-medium leading-tight">Overview</h2>
               <p className="text-sm text-muted-foreground">
                 {ready ? `${total.toLocaleString()} chats from ${accountCount} accounts on this computer` : "Looking for chats on this computer…"}
               </p>
             </div>
+            <div className="flex shrink-0 items-center gap-2">{actions}</div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
             {cards.map((s) => (
               <div key={s.label} className="rounded-xl border bg-card p-4">
                 <IconBox>{s.icon}</IconBox>
@@ -160,6 +166,9 @@ export function OverviewPage({
                     <span className="flex items-center gap-1.5">
                       <span className="size-2 rounded-full" style={{ background: CODEX }} /> Codex
                     </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="size-2 rounded-full" style={{ background: CURSOR }} /> Cursor
+                    </span>
                   </div>
                 }
               >
@@ -180,13 +189,14 @@ export function OverviewPage({
                                     <div className="flex flex-col-reverse overflow-hidden rounded-md" style={{ height: `${Math.max(8, (d.total / max) * 100)}%` }}>
                                       <div style={{ flex: d.claude, background: CLAUDE }} />
                                       <div style={{ flex: d.codex, background: CODEX }} />
+                                      <div style={{ flex: d.cursor, background: CURSOR }} />
                                     </div>
                                   )}
                                 </div>
                               }
                             />
                             <TooltipContent>
-                              {d.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}: {d.claude} Claude, {d.codex} Codex
+                              {d.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}: {d.claude} Claude, {d.codex} Codex, {d.cursor} Cursor
                             </TooltipContent>
                           </Tooltip>
                         ))}

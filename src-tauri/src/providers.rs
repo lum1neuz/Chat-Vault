@@ -24,7 +24,7 @@ pub struct Msg {
 }
 
 impl Msg {
-    fn new(role: &str, ts: &str, text: String, kind: &str) -> Msg {
+    pub fn new(role: &str, ts: &str, text: String, kind: &str) -> Msg {
         Msg { role: role.into(), ts: ts.into(), text, kind: kind.into(), id: None, name: None, data: None, error: None }
     }
 }

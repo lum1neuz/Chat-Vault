@@ -1,3 +1,4 @@
+mod cursor;
 mod index;
 mod paths;
 mod providers;
@@ -28,7 +29,7 @@ struct MsgPage {
 }
 
 fn provider_ok(p: &str) -> Result<(), String> {
-    if p == "claude" || p == "codex" {
+    if p == "claude" || p == "codex" || p == "cursor" {
         Ok(())
     } else {
         Err("Unknown provider".into())
@@ -98,6 +99,14 @@ async fn chats_by_ids(provider: String, ids: Vec<String>) -> Result<Vec<ChatSumm
 async fn read_chat_page(provider: String, path: String, before: Option<usize>, limit: usize) -> Result<MsgPage, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
+        if provider == "cursor" {
+            let all: Vec<Msg> = cursor::read(&path)?.into_iter().map(|m| clip_msg(m, 30_000)).collect();
+            let total = all.len();
+            let limit = limit.clamp(1, 2000);
+            let end = before.map(|b| b.min(total)).unwrap_or(total);
+            let start = end.saturating_sub(limit);
+            return Ok(MsgPage { messages: all[start..end].to_vec(), total, start });
+        }
         let p = check_transcript(&path)?;
         let lines = open_lines(&p).ok_or("Cannot open that chat")?;
         let limit = limit.clamp(1, 2000);
@@ -142,6 +151,9 @@ async fn read_chat_page(provider: String, path: String, before: Option<usize>, l
 async fn read_chat_all(provider: String, path: String) -> Result<Vec<Msg>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
+        if provider == "cursor" {
+            return Ok(cursor::read(&path)?.into_iter().filter(is_readable).map(|m| clip_msg(m, 20_000)).collect());
+        }
         let p = check_transcript(&path)?;
         let lines = open_lines(&p).ok_or("Cannot open that chat")?;
         let mut out = Vec::new();
@@ -169,6 +181,18 @@ async fn deep_search(provider: String, query: String) -> Result<Vec<SearchHit>, 
             return Ok(Vec::new());
         }
         let mut hits = Vec::new();
+        if provider == "cursor" {
+            for (id, path) in index::recent_paths(&provider, 3000)? {
+                let Ok(msgs) = cursor::read(&path) else { continue };
+                if let Some(m) = msgs.iter().filter(|m| is_readable(m)).find(|m| m.text.to_lowercase().contains(&q)) {
+                    let low = m.text.to_lowercase();
+                    let pos = low.find(&q).unwrap_or(0);
+                    let start = m.text[..pos.min(m.text.len())].char_indices().rev().nth(40).map(|(i, _)| i).unwrap_or(0);
+                    hits.push(SearchHit { id, snippet: clip(m.text[start..].replace('\n', " ").trim(), 140) });
+                }
+            }
+            return Ok(hits);
+        }
         for (id, path) in index::recent_paths(&provider, 3000)? {
             let Some(lines) = open_lines(Path::new(&path)) else { continue };
             'file: for line in lines {
@@ -205,7 +229,7 @@ async fn deep_search(provider: String, query: String) -> Result<Vec<SearchHit>, 
 
 #[tauri::command]
 fn reveal_in_folder(path: String) -> Result<(), String> {
-    let p = check_transcript(&path)?;
+    let p = if path.starts_with("cursor-") { cursor::real_file(&path).ok_or("That Cursor file is not available")? } else { check_transcript(&path)? };
     let p = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     Command::new("explorer").arg(format!("/select,{}", p)).spawn().map_err(|e| e.to_string())?;
     Ok(())
@@ -224,6 +248,9 @@ fn open_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn delete_chat(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if path.starts_with("cursor-") {
+            return Err("Cursor chats live inside Cursor's own database, so they can only be deleted in Cursor".to_string());
+        }
         let p = check_transcript(&path)?;
         let plain = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
         use std::os::windows::process::CommandExt;
@@ -248,6 +275,15 @@ async fn delete_chat(path: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn open_in_cursor(path: String) -> Result<(), String> {
+    if !Path::new(&path).is_dir() {
+        return Err("That folder no longer exists".into());
+    }
+    Command::new("cursor").arg(&path).spawn().map_err(|_| "Cursor could not be started. Is it installed?".to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -429,6 +465,7 @@ pub fn run() {
             reveal_in_folder,
             open_folder,
             open_backup_folder,
+            open_in_cursor,
             delete_chat,
             open_in_claude,
             save_markdown,
@@ -457,7 +494,7 @@ mod tests {
         let t = Instant::now();
         index::refresh(None).unwrap();
         println!("second refresh (no changes): {:?}", t.elapsed());
-        for prov in ["claude", "codex"] {
+        for prov in ["claude", "codex", "cursor"] {
             let o = index::overview(prov).unwrap();
             println!("{prov}: {} chats, accounts {:?}", o.total, o.accounts.iter().map(|a| (a.id.chars().take(8).collect::<String>(), a.count)).collect::<Vec<_>>());
             assert!(o.total > 0, "{prov} has chats");

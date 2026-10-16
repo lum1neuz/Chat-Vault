@@ -1,62 +1,151 @@
+<div align="center">
+
+<img src="app-icon.png" alt="ChatVault" width="96" height="96" />
+
 # ChatVault
 
-A small Windows desktop app that finds every Claude Code chat stored on your PC, across all the accounts you have used, and lets you read, search and export them.
+**One place to read, search, back up and continue every AI coding chat on your PC.**
 
-Claude only shows the chats of the account that is signed in. The full transcripts stay on disk, so ChatVault reads them directly.
+Claude Code · Codex · Cursor — across every account you have ever signed in with.
 
-## Features
+[![Latest release](https://img.shields.io/github/v/release/ssanaullahrais/Chat-Vault?style=flat-square&label=release)](https://github.com/ssanaullahrais/Chat-Vault/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/ssanaullahrais/Chat-Vault/total?style=flat-square)](https://github.com/ssanaullahrais/Chat-Vault/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)](#download)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB?style=flat-square)](https://tauri.app)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
-- Lists chats from every account on this computer, newest first, loading 20 at a time as you scroll.
-- Filters by account with a dropdown, and by title or project as you type.
-- Searches inside the text of all chats (press Enter in the search box).
-- Reads a chat as message bubbles, with local times, collapsible long messages and optional tool steps.
-- A round button jumps to the bottom of a long chat.
-- A three-dots menu on every chat with quick actions, and the same actions in the chat header.
-- **Continue in Claude:** opens a terminal in the project folder and runs `claude --resume <id>`. Claude Code finds the transcript on disk, so it works for chats from another account and uses the account signed in to the CLI. "Continue in Claude (copy)" adds `--fork-session`, so the original chat file is not changed.
-- **Continue in Codex:** saves a handoff file (the whole chat, or the first and last messages plus a list of requests for very long chats) to `Documents\ChatVault Handoffs`, then starts `codex` in the project folder with a prompt that tells it to read that file and carry on.
-- Open in the Claude app, show the transcript file, copy the Claude or Codex command, copy as Markdown, or save a `.md` file.
-- Light and dark themes.
+[Download](#download) · [Features](#features) · [How it works](#how-it-works) · [Privacy](#privacy) · [Build from source](#build-from-source)
 
-ChatVault only reads files and never changes them.
+</div>
 
-## Where it looks
+---
 
-| What | Folder |
-| --- | --- |
-| Transcripts | `%USERPROFILE%\.claude\projects\*\*.jsonl` |
-| Titles, times, accounts | `%APPDATA%\Claude\claude-code-sessions\<account>\<org>\local_*.json` |
+## Why ChatVault?
 
-Chats without title information are still listed, under "No account info".
+Claude, Codex and Cursor keep your chats on your computer, but each app only shows the chats of the account that is signed in right now. Sign out, switch accounts or reinstall, and your history seems to vanish, even though the files are still on disk.
+
+ChatVault finds those files, lists them in one fast window, and lets you read them, search them, back them up and **pick the work up again in another tool without losing the context**.
 
 ## Download
 
-Installers (`.msi` and `.exe`) are on the [Releases](../../releases) page.
+Get the latest installer from the **[Releases page](https://github.com/ssanaullahrais/Chat-Vault/releases/latest)**.
 
-## Develop
+| File | Use it when |
+| --- | --- |
+| `ChatVault_x.y.z_x64-setup.exe` | You want the normal installer (recommended) |
+| `ChatVault_x.y.z_x64_en-US.msi` | You deploy with Windows Installer or Group Policy |
+| `ChatVault_x.y.z_x64-portable.exe` | You want to run it without installing |
 
-Needs Node 20+, Rust and the Tauri prerequisites for Windows (WebView2 and the Visual Studio C++ build tools).
+Requires Windows 10 or 11 (64-bit). The installers are small (about 3 to 4 MB) and use the WebView2 runtime that ships with Windows.
+
+> **Updates are automatic.** ChatVault checks GitHub for a newer release, downloads it in the background and shows a toast with a **Restart now** button.
+
+## Features
+
+### Read everything in one place
+
+- **Claude Code, Codex and Cursor** in a single list, with a tab for each tool.
+- **Every account at once.** A dropdown filters by account and shows the email when it is known.
+- **Built for huge histories.** Chats come from a local SQLite index and load 20 at a time as you scroll. Re-scanning only reads files that changed, and a 240 MB chat opens in about two seconds.
+- **Pinned and Recents**, sort and filter menus, grouping by project, and your own chat names. All of it is remembered between launches.
+
+### A chat view that is easy to read
+
+- Message bubbles with copy actions, code blocks with syntax highlighting and a copy button.
+- Tool use is collapsed into tidy **steps**: terminal commands with their output, plans and to-do lists, sub-agent runs, web sources, reasoning and error stack traces.
+- Links become **inline citations** with a hover preview.
+- A **conversation bar** beside the chat shows every question you asked. It swells like a wave under your pointer and previews the question you are about to jump to.
+- **Find in chat** (`Ctrl+F`) with highlighted matches, and **global search** (`Ctrl+K`) across both chats and actions.
+- Long chats load their newest messages first, with **Load earlier messages** when you want more.
+
+### Continue the work anywhere
+
+- **Continue in Claude Code** (`claude --resume`) or **in Codex** (`codex resume`) with one click. It works for chats from other accounts too, because the transcript is read straight from disk.
+- **Continue in the other tool.** A Claude chat can continue in Codex and the other way round. ChatVault writes a *handoff file* with the whole conversation and starts the other tool with a prompt to read it, so no context is lost.
+- Fork a chat as a copy, open the project folder, copy ready-made PowerShell commands, or export a chat as Markdown.
+
+### Never lose a chat
+
+- **Sync & backup** copies Claude and Codex chats to `Documents\ChatVault Backup`. ChatVault also reads that folder, so your chats stay visible after you sign out or reinstall.
+- **Restore missing** copies back only the chats that are gone, so Claude and Codex can list them again. It never overwrites or deletes anything.
+- **Delete with confirmation** moves a chat to the Recycle Bin, so it can still be restored.
+
+### An overview that tells you something
+
+Chats per tool, activity for the last 14 days, your busiest projects, space used on disk, backup status and a quick way back into your latest chats.
+
+## Supported tools
+
+| Tool | Reads | Continue | Notes |
+| --- | --- | --- | --- |
+| **Claude Code** | Terminal and desktop-app chats | Resume, fork, handoff to Codex | Titles and accounts come from the Claude desktop app's session files |
+| **Codex** | Current and compressed (`.jsonl.zst`) chats | Resume, fork, handoff to Claude | Thread names come from `session_index.jsonl` |
+| **Cursor** | IDE chats in the older format, and Cursor CLI chats | Handoff to Claude or Codex | Newer Cursor agent chats are encrypted by Cursor and cannot be read from outside it |
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["~/.claude/projects"] --> I
+    B["~/.codex/sessions"] --> I
+    C["Cursor databases"] --> I
+    D["Documents/ChatVault Backup"] --> I
+    I[("SQLite index<br/>incremental")] --> U["ChatVault window"]
+    U -->|resume| T1["claude / codex"]
+    U -->|handoff file| T2["any tool"]
+    U -->|sync| D
+```
+
+1. **Scan.** A Rust scanner reads the places each tool stores chats. Only new or changed files are parsed again.
+2. **Index.** Titles, projects, accounts and times go into a local SQLite database with full-text search.
+3. **Read on demand.** A chat is parsed only when you open it, one window of messages at a time.
+
+## Privacy
+
+ChatVault is a local app. It only **reads** your chat files, never uploads them and needs no account. The only network request it makes is to GitHub, to check for a new version. It never touches your sign-in files.
+
+## Keyboard shortcuts
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl` + `K` | Search chats and actions |
+| `Ctrl` + `F` | Find in the open chat |
+| `Enter` / `Shift` + `Enter` | Next or previous match |
+| `Esc` | Close search |
+
+## Build from source
+
+You need Node 20 or newer, Rust, and the [Tauri prerequisites for Windows](https://tauri.app/start/prerequisites/) (WebView2 and the Visual Studio C++ build tools).
 
 ```bash
+git clone https://github.com/ssanaullahrais/Chat-Vault.git
+cd Chat-Vault
 npm install
-npm run tauri dev
+npm run tauri dev      # run with hot reload
+npm run tauri build    # build the installers
 ```
 
-Build installers:
+The installers appear in `src-tauri/target/release/bundle/`. To produce the signed update files, set `TAURI_SIGNING_PRIVATE_KEY` first.
+
+## Releasing
+
+Update the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, then push a matching tag:
 
 ```bash
-npm run tauri build
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The installers are written to `src-tauri/target/release/bundle/`.
+The [release workflow](.github/workflows/release.yml) builds the `.msi`, the setup `.exe` and a portable `.exe`, signs the update bundles and publishes everything, including the `latest.json` that installed copies use to update themselves.
 
-## Releases
+## Tech stack
 
-Pushing a tag like `v0.1.0` runs `.github/workflows/release.yml`, which builds the installers and attaches them to a GitHub release.
-
-## Stack
-
-Tauri 2, React 19, TypeScript, Tailwind CSS 4 and shadcn/ui. The scanning and parsing is written in Rust.
+[Tauri 2](https://tauri.app) · Rust · SQLite (FTS5) · React 19 · TypeScript · Tailwind CSS 4 · [shadcn/ui](https://ui.shadcn.com)
 
 ## License
 
-MIT
+[MIT](LICENSE) © Sanaullah Rais
+
+<div align="center">
+<sub>ChatVault is an independent project and is not affiliated with Anthropic, OpenAI or Anysphere.</sub>
+</div>

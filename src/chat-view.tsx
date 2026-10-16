@@ -40,7 +40,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
 import { Highlight, MessageBody } from "@/message-body";
-import { PROVIDER_NAME, accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { PROVIDER_NAME, PROVIDER_SHORT, accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { HeaderSkeleton, MessagesSkeleton } from "@/skeletons";
 import { PlanBlock, StepItem, SubagentBlock, isAgent, isPlan, mergeResults, stepName, type Item } from "@/steps";
 
@@ -401,10 +401,14 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
             </div>
           );
         })}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onClick={onDelete}>
-          <Trash2 className="size-4" strokeWidth={1.5} /> Delete chat
-        </DropdownMenuItem>
+        {chat.provider !== "cursor" && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              <Trash2 className="size-4" strokeWidth={1.5} /> Delete chat
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -446,7 +450,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
   const [copied, setCopied] = useState<string | null>(null);
   const time = m.ts ? new Date(m.ts).toLocaleTimeString(undefined, { timeStyle: "short" }) : "";
   const isUser = m.role === "user";
-  const who = isUser ? "You" : provider === "claude" ? "Claude" : "Codex";
+  const who = isUser ? "You" : PROVIDER_SHORT[provider];
 
   if (m.kind === "summary") {
     return (
@@ -481,8 +485,8 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
     <Message align={isUser ? "end" : "start"}>
       <MessageAvatar className="self-start bg-transparent">
         <Avatar>
-          <AvatarFallback className={cn("overflow-hidden", isUser ? "bg-secondary text-secondary-foreground" : provider === "claude" ? "bg-muted" : "bg-transparent")}>
-            {isUser ? <User className="size-4" /> : <ProviderLogo provider={provider} className={provider === "claude" ? "size-5" : "size-full"} />}
+          <AvatarFallback className={cn("overflow-hidden", isUser ? "bg-secondary text-secondary-foreground" : provider === "codex" ? "bg-transparent" : "bg-muted")}>
+            {isUser ? <User className="size-4" /> : <ProviderLogo provider={provider} className={provider === "codex" ? "size-full" : "size-5"} />}
           </AvatarFallback>
         </Avatar>
       </MessageAvatar>
@@ -582,8 +586,8 @@ function ConversationBar({ ticks, onPick }: { ticks: BarTick[]; onPick: (i: numb
             onClick={() => onPick(t.i)}
           >
             <div
-              className="rounded-full bg-foreground transition-[width,opacity,height] duration-100 ease-out"
-              style={{ width, height: 2 + 1.5 * f, opacity: t.active ? 1 : 0.28 + 0.72 * f }}
+              className={cn("rounded-full transition-[width,opacity,height] duration-100 ease-out", t.active ? "bg-foreground" : "bg-muted-foreground")}
+              style={{ width, height: t.active ? 2 : 1 + 0.5 * f, opacity: t.active ? 1 : 0.35 + 0.3 * f }}
             />
           </div>
         );

@@ -13,7 +13,6 @@ import {
   RotateCcw,
   LayoutDashboard,
   Loader2,
-  MessagesSquare,
   Moon,
   MoreHorizontal,
   Pencil,
@@ -37,8 +36,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { ProviderLogo } from "@/claude-logo";
-import { PROVIDER_NAME, accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { AppLogo, ProviderLogo } from "@/claude-logo";
+import { PROVIDERS, PROVIDER_NAME, PROVIDER_SHORT, accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { ChatView } from "@/chat-view";
 import { OverviewPage } from "@/overview";
 import { CommandPalette } from "@/command-palette";
@@ -82,7 +81,7 @@ export default function App() {
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const { pins, names, togglePin, rename } = useChatMeta();
 
-  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null });
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
   const account = accounts[provider] ?? "all";
   const [query, setQuery] = useState("");
@@ -161,7 +160,7 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri) return;
-    (["claude", "codex"] as Provider[]).forEach((p) =>
+    PROVIDERS.forEach((p) =>
       invoke<Overview>("provider_overview", { provider: p })
         .then((o) => setOverview((s) => ({ ...s, [p]: o })))
         .catch(() => {}),
@@ -312,7 +311,7 @@ export default function App() {
   const recent = items.filter((c) => !pinSet.has(chatKey(c)));
   const msgs: Msg[] | null = page?.messages ?? null;
 
-  const extras = (c: Chat): ChatAction[] => orderChat([
+  const extras = (c: Chat): ChatAction[] => orderChat(([
     { id: "view", label: "Open in ChatVault", hint: "Reads this chat here.", icon: Eye, group: "Chat", run: async () => open(c) },
     {
       id: "pin",
@@ -332,7 +331,7 @@ export default function App() {
       run: async () => setDeleting(c),
     },
     { id: "rename", label: "Rename", hint: "Give this chat your own name. The original is not changed.", icon: Pencil, group: "Chat", run: async () => setRenaming(c) },
-  ]);
+  ] as ChatAction[]).filter((a) => !(a.id === "delete" && c.provider === "cursor")));
 
   const row = (c: Chat) => (
     <ChatRow
@@ -350,6 +349,32 @@ export default function App() {
 
   const cmeta = `${((overview.claude?.total ?? 0) + (overview.codex?.total ?? 0)).toLocaleString()} chats on this PC`;
 
+  const controls = (
+    <>
+            <Tip label="Search chats and actions (Ctrl+K)">
+              <Button variant="outline" size="sm" className="text-muted-foreground" onClick={() => setPaletteOpen(true)}>
+                <Search className="size-4" /> Search
+                <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
+              </Button>
+            </Tip>
+            <Tip label="Copy every Claude and Codex chat to your Documents folder, or restore them.">
+              <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>
+                <DatabaseBackup className="size-4" /> Sync &amp; backup
+              </Button>
+            </Tip>
+            <Tip label="Scan this PC for new chats.">
+              <Button variant="ghost" size="icon" onClick={rescan} aria-label="Refresh" disabled={!!indexing}>
+                <RefreshCw className={cn("size-4", indexing && "animate-spin")} />
+              </Button>
+            </Tip>
+            <Tip label={dark ? "Switch to light theme" : "Switch to dark theme"}>
+              <Button variant="ghost" size="icon" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
+                {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+              </Button>
+            </Tip>
+    </>
+  );
+
   return (
     <TooltipProvider delay={200}>
       <div className="flex h-screen bg-background text-foreground">
@@ -360,9 +385,7 @@ export default function App() {
             className="flex items-center gap-2 p-3 text-left transition hover:bg-muted/60"
             title="Back to the overview"
           >
-            <div className="flex size-8 items-center justify-center rounded-lg bg-muted">
-              <MessagesSquare className="size-4 text-muted-foreground" strokeWidth={1.5} />
-            </div>
+            <AppLogo className="size-8 shrink-0 rounded-lg" />
             <div className="min-w-0 flex-1">
               <h1 className="text-base font-medium leading-tight">ChatVault</h1>
               <p className="truncate text-xs text-muted-foreground">
@@ -373,11 +396,11 @@ export default function App() {
 
           <div className="space-y-2 px-3 pb-2">
             <Tabs value={provider} onValueChange={(v) => switchProvider(v as Provider)}>
-              <TabsList className="grid w-full grid-cols-2">
-                {(["claude", "codex"] as Provider[]).map((p) => (
+              <TabsList className="grid w-full grid-cols-3">
+                {PROVIDERS.map((p) => (
                   <TabsTrigger key={p} value={p} className="gap-1.5">
                     <ProviderLogo provider={p} className="size-4" />
-                    {p === "claude" ? "Claude" : "Codex"}
+                    {PROVIDER_SHORT[p]}
                     <span className="text-xs text-muted-foreground">{overview[p] ? overview[p]!.total.toLocaleString() : "…"}</span>
                   </TabsTrigger>
                 ))}
@@ -488,33 +511,16 @@ export default function App() {
 
         {/* Content */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-            <p className="min-w-0 flex-1 truncate text-sm font-medium">{selected ? `${PROVIDER_NAME[selected.provider]} / ${selected.project}` : "Overview"}</p>
-            <Tip label="Search chats and actions (Ctrl+K)">
-              <Button variant="outline" size="sm" className="text-muted-foreground" onClick={() => setPaletteOpen(true)}>
-                <Search className="size-4" /> Search
-                <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
-              </Button>
-            </Tip>
-            <Tip label="Copy every Claude and Codex chat to your Documents folder, or restore them.">
-              <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>
-                <DatabaseBackup className="size-4" /> Sync &amp; backup
-              </Button>
-            </Tip>
-            <Tip label="Scan this PC for new chats.">
-              <Button variant="ghost" size="icon" onClick={rescan} aria-label="Refresh" disabled={!!indexing}>
-                <RefreshCw className={cn("size-4", indexing && "animate-spin")} />
-              </Button>
-            </Tip>
-            <Tip label={dark ? "Switch to light theme" : "Switch to dark theme"}>
-              <Button variant="ghost" size="icon" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
-                {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-              </Button>
-            </Tip>
-          </div>
+          {selected && (
+            <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+              <p className="min-w-0 flex-1 truncate text-sm font-medium">{`${PROVIDER_NAME[selected.provider]} / ${selected.project}`}</p>
+              {controls}
+            </div>
+          )}
 
           {!selected ? (
             <OverviewPage
+              actions={controls}
               overview={overview}
               accountCount={new Set([...(overview.claude?.accounts ?? []), ...(overview.codex?.accounts ?? [])].map((a) => a.id)).size}
               reloadKey={reloadKey}
@@ -750,7 +756,7 @@ function Tip({ label, children }: { label: string; children: ReactNode }) {
 
 function DeleteDialog({ chat, onClose, onConfirm }: { chat: Chat | null; onClose: () => void; onConfirm: (c: Chat) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
-  const tool = chat?.provider === "codex" ? "Codex" : "Claude Code";
+  const tool = chat ? PROVIDER_NAME[chat.provider] : "";
   return (
     <AlertDialog open={!!chat} onOpenChange={(o) => !o && !busy && onClose()}>
       <AlertDialogContent className="sm:max-w-md">

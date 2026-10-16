@@ -392,7 +392,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         let cindex = load_codex_index();
 
         let tx = c.transaction().map_err(|e| e.to_string())?;
-        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !Path::new(p).exists()) {
+        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !p.starts_with("cursor-") && !Path::new(p).exists()) {
             let _ = tx.execute(
                 "DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE path=?1)",
                 params![path],
@@ -436,6 +436,40 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             );
         }
         tx.commit().map_err(|e| e.to_string())?;
+                // Cursor chats are rebuilt only when Cursor's files changed.
+        let fp = crate::cursor::fingerprint();
+        let last: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider='cursor'", [], |r| r.get(0)).unwrap_or(0);
+        if fp > 0 && fp != last {
+            let chats = crate::cursor::scan();
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider='cursor')", []);
+            let _ = tx.execute("DELETE FROM chats WHERE provider='cursor'", []);
+            for ch in chats {
+                let row = Row {
+                    s: ChatSummary {
+                        provider: "cursor".into(),
+                        id: ch.id,
+                        local_id: None,
+                        title: ch.title.clone(),
+                        account: "local".into(),
+                        project: project_of(&ch.cwd, "Cursor"),
+                        cwd: ch.cwd,
+                        created_ms: ch.created_ms,
+                        last_ms: ch.last_ms,
+                        archived: false,
+                        size: ch.size,
+                        path: ch.path,
+                        model: None,
+                        has_metadata: true,
+                        backup: false,
+                    },
+                    mtime: fp,
+                    preview: ch.title,
+                };
+                let _ = upsert(&tx, &row, true);
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
         Ok(())
     })();

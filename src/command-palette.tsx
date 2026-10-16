@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command";
 import { ProviderLogo } from "@/claude-logo";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { type Chat, type Provider } from "@/chat-actions";
+import { PROVIDERS, PROVIDER_SHORT, type Chat, type Provider } from "@/chat-actions";
 
 
 export type PaletteAction = { id: string; label: string; icon: ReactNode; shortcut?: string; run: () => void };
@@ -40,11 +40,11 @@ export function CommandPalette({
     const t = window.setTimeout(async () => {
       try {
         const both = await Promise.all(
-          (["claude", "codex"] as Provider[]).map((p) =>
+          PROVIDERS.map((p) =>
             invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q: value.trim(), offset: 0, limit: 8 }).then((r) => r.items),
           ),
         );
-        if (!stale) setResults([...both[0], ...both[1]].sort((a, b) => b.lastMs - a.lastMs).slice(0, 12));
+        if (!stale) setResults(both.flat().sort((a, b) => b.lastMs - a.lastMs).slice(0, 12));
       } catch {
         if (!stale) setResults([]);
       } finally {
@@ -80,7 +80,7 @@ export function CommandPalette({
         <CommandList className="max-h-none overflow-visible">
           {!loading && results.length === 0 && shownActions.length === 0 && shownPinned.length === 0 && <CommandEmpty>No results found.</CommandEmpty>}
           {shownPinned.length > 0 && (
-            <CommandGroup heading={`Pinned · ${provider === "claude" ? "Claude" : "Codex"}`}>{shownPinned.map(item)}</CommandGroup>
+            <CommandGroup heading={`Pinned · ${PROVIDER_SHORT[provider]}`}>{shownPinned.map(item)}</CommandGroup>
           )}
           {results.length > 0 && (
             <>
