@@ -27,6 +27,7 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { ClaudeLogo } from "@/claude-logo";
 import { accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg } from "@/chat-actions";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
@@ -233,6 +234,11 @@ export default function App() {
                     selected?.id === c.id && "border-border bg-muted",
                   )}
                 >
+                  <div className="flex items-start gap-2.5">
+                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                      <ClaudeLogo className="size-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">{c.title}</span>
                     {c.archived && <Archive className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}
@@ -244,6 +250,8 @@ export default function App() {
                     <span className="shrink-0">{fmtDate(c.lastMs)}</span>
                   </div>
                   {hits?.[c.id] && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{hits[c.id]}</p>}
+                    </div>
+                  </div>
                 </div>
               ))}
               {visible.length > limit && (
