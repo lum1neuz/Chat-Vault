@@ -708,8 +708,8 @@ const ChatRow = memo(function ChatRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="min-w-0 flex-1 truncate text-sm font-medium">{chat.title}</span>
-            {pinned && <Pin className="size-3 shrink-0 text-muted-foreground group-hover:hidden" />}
-            {(chat.archived || chat.backup) && <Archive className="size-3.5 shrink-0 text-muted-foreground group-hover:hidden" strokeWidth={1.5} />}
+            {pinned && <Pin className="size-3 shrink-0 text-muted-foreground" />}
+            {(chat.archived || chat.backup) && <Archive className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}
             <ChatMenu chat={chat} toast={toast} msgs={msgs} extras={extras} />
           </div>
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
