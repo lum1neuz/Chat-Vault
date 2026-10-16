@@ -6,7 +6,9 @@ import {
   FileDown,
   FileText,
   FolderOpen,
+  FolderTree,
   GitFork,
+  Hash,
   Sparkles,
   Terminal,
   type LucideIcon,
@@ -182,11 +184,31 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
   list.push(
     {
       id: "reveal",
-      label: "Show file",
+      label: "Show transcript file",
       hint: "Shows the transcript file in File Explorer.",
       icon: FolderOpen,
       group: "Open",
       run: () => invoke("reveal_in_folder", { path: chat.path }),
+    },
+    ...(chat.cwd
+      ? [
+          {
+            id: "folder",
+            label: "Open project folder",
+            hint: "Opens the folder this chat worked in.",
+            icon: FolderTree,
+            group: "Open" as const,
+            run: () => invoke<void>("open_folder", { path: chat.cwd }),
+          },
+        ]
+      : []),
+    {
+      id: "copy-id",
+      label: "Copy chat ID",
+      hint: "Copies the session id, useful for scripts and support.",
+      icon: Hash,
+      group: "Copy",
+      run: () => copy(chat.id, "Chat ID"),
     },
     {
       id: "copy-claude",

@@ -27,6 +27,15 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ClaudeLogo } from "@/claude-logo";
 import { accountLabel, chatActions, fmtDate, fmtSize, type Chat, type ChatAction, type Msg } from "@/chat-actions";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -340,17 +349,27 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   {chatActions(selected, toast.show, msgs)
-                    .filter((a) => ["claude", "claude-fork", "codex", "open", "reveal", "copy-md", "save-md"].includes(a.id))
+                    .filter((a) => a.id === "claude" || a.id === "codex")
                     .map((a) => (
                       <Tip key={a.id} label={a.hint}>
-                        <ActionButton action={a} primary={a.group === "Continue"} onError={toast.show} />
+                        <ActionButton action={a} primary={a.id === "claude"} onError={toast.show} />
                       </Tip>
                     ))}
-                  <Button size="sm" variant={showTools ? "secondary" : "ghost"} onClick={() => setShowTools((s) => !s)}>
-                    <Wrench className="size-4" strokeWidth={1.5} /> {showTools ? "Hide" : "Show"} tool steps
-                  </Button>
+                  <ActionsMenu chat={selected} msgs={msgs} toast={toast.show} />
+                  <div className="ml-auto">
+                    <Tip label={showTools ? "Hide the tool steps" : "Show the tool steps Claude took"}>
+                      <Button
+                        size="icon"
+                        variant={showTools ? "secondary" : "ghost"}
+                        aria-label="Toggle tool steps"
+                        onClick={() => setShowTools((s) => !s)}
+                      >
+                        <Wrench className="size-4" strokeWidth={1.5} />
+                      </Button>
+                    </Tip>
+                  </div>
                 </div>
               </header>
 
@@ -469,7 +488,7 @@ function ActionButton({ action, primary, onError }: { action: ChatAction; primar
 function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => void; msgs: Msg[] | null }) {
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const actions = chatActions(chat, toast, msgs);
+  const actions = chatActions(chat, toast, msgs).filter((a) => ["claude", "codex", "open", "reveal", "copy-md"].includes(a.id));
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(false);
@@ -480,7 +499,7 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
       window.removeEventListener("resize", close);
     };
   }, [open]);
-  const groups = ["Continue", "Open", "Copy", "Save"] as const;
+  const groups = ["Continue", "Open", "Copy"] as const;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -534,5 +553,39 @@ function ChatMenu({ chat, toast, msgs }: { chat: Chat; toast: (m: string) => voi
         })}
       </PopoverContent>
     </Popover>
+  );
+}
+
+function ActionsMenu({ chat, msgs, toast }: { chat: Chat; msgs: Msg[] | null; toast: (m: string) => void }) {
+  const actions = chatActions(chat, toast, msgs).filter((a) => a.id !== "claude" && a.id !== "codex");
+  const groups = ["Continue", "Open", "Copy", "Save"] as const;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger render={<Button size="sm" variant="outline" />}>
+        <MoreHorizontal className="size-4" /> Actions <ChevronDown className="size-3.5 text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-60">
+        {groups.map((g, gi) => {
+          const items = actions.filter((a) => a.group === g);
+          if (!items.length) return null;
+          return (
+            <div key={g}>
+              {gi > 0 && <DropdownMenuSeparator />}
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>{g}</DropdownMenuLabel>
+                {items.map((a) => {
+                  const Icon = a.icon;
+                  return (
+                    <DropdownMenuItem key={a.id} title={a.hint} onClick={() => a.run().catch((e) => toast(String(e)))}>
+                      <Icon className="size-4" strokeWidth={1.5} /> {a.label}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuGroup>
+            </div>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

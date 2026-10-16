@@ -361,6 +361,15 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    if !Path::new(&path).is_dir() {
+        return Err("That folder no longer exists".into());
+    }
+    Command::new("explorer").arg(&path).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn open_in_claude(local_id: String) -> Result<(), String> {
     if !local_id.starts_with("local_")
         || !local_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -464,6 +473,7 @@ pub fn run() {
             search_chats,
             reveal_in_folder,
             open_in_claude,
+            open_folder,
             save_markdown,
             save_handoff,
             launch_agent
