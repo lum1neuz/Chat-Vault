@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   ArrowDown,
   Check,
@@ -25,7 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
+import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "@/components/ui/message";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -246,7 +246,7 @@ export function ChatView(p: Props) {
               {chat.model && <Badge variant="outline">{chat.model}</Badge>}
               {chat.backup && <Badge variant="outline">Backup copy</Badge>}
               <span className="text-xs text-muted-foreground">
-                {fmtDate(chat.lastMs)} · {fmtSize(chat.size)} · {page.total.toLocaleString()} messages
+                {fmtDate(chat.lastMs)} Â· {fmtSize(chat.size)} Â· {page.total.toLocaleString()} messages
               </span>
             </div>
           )}
@@ -284,7 +284,7 @@ export function ChatView(p: Props) {
             <div className="flex items-center gap-2 px-4 pt-2 text-xs text-muted-foreground">
               Searching the latest {page.messages.length.toLocaleString()} messages.
               <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={loadingAll} onClick={loadAll}>
-                {loadingAll ? "Loading…" : `Load all ${page.total.toLocaleString()} messages`}
+                {loadingAll ? "Loadingâ€¦" : `Load all ${page.total.toLocaleString()} messages`}
               </Button>
             </div>
           )}
@@ -297,7 +297,7 @@ export function ChatView(p: Props) {
           {!page ? (
             <MessagesSkeleton />
           ) : (
-            <div className="mx-auto max-w-3xl space-y-5 p-4 pl-12">
+            <div className="mx-auto max-w-3xl space-y-7 p-4 pl-12">
               {page.start > 0 && (
                 <div className="flex justify-center">
                   <Button size="sm" variant="outline" onClick={p.onLoadEarlier} disabled={p.loadingEarlier}>
@@ -500,7 +500,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
 
   const long = m.text.length > 1800;
   const expanded = open || !!q;
-  const text = long && !expanded ? m.text.slice(0, 1800) + "…" : m.text;
+  const text = long && !expanded ? m.text.slice(0, 1800) + "â€¦" : m.text;
   const copy = async (what: string, value: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -513,7 +513,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
 
   return (
     <Message align={isUser ? "end" : "start"}>
-      <MessageAvatar className="self-start">
+      <MessageAvatar className="self-start group-has-data-[slot=message-footer]/message:translate-y-0">
         <Avatar size="sm">
           <AvatarFallback className="bg-muted">{isUser ? <User className="size-3.5" /> : <ProviderLogo provider={provider} className="size-4" />}</AvatarFallback>
         </Avatar>
@@ -532,23 +532,20 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
               </button>
             )}
           </BubbleContent>
-          <div
-            className={cn(
-              "absolute -top-3 flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 opacity-0 shadow-sm transition-opacity group-hover/message:opacity-100 focus-within:opacity-100",
-              isUser ? "right-2" : "left-2",
-            )}
-          >
+        </Bubble>
+        <MessageFooter className={cn("px-1", isUser && "justify-end")}>
+          <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/message:opacity-100 focus-within:opacity-100">
             <MiniAction label={copied === "text" ? "Copied" : "Copy message"} onClick={() => copy("text", m.text)}>
               {copied === "text" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             </MiniAction>
-            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** · ${time}\n\n${m.text}`)}>
+            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** Â· ${time}\n\n${m.text}`)}>
               {copied === "md" ? <Check className="size-3.5" /> : <FileText className="size-3.5" />}
             </MiniAction>
             <MiniAction label={copied === "quote" ? "Copied" : "Copy as quote"} onClick={() => copy("quote", m.text.split("\n").map((l) => `> ${l}`).join("\n"))}>
               {copied === "quote" ? <Check className="size-3.5" /> : <Quote className="size-3.5" />}
             </MiniAction>
           </div>
-        </Bubble>
+        </MessageFooter>
       </MessageContent>
     </Message>
   );
@@ -562,3 +559,4 @@ function MiniAction({ label, onClick, children }: { label: string; onClick: () =
     </Tooltip>
   );
 }
+
