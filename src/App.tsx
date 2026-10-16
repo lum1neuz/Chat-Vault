@@ -106,6 +106,7 @@ export default function App() {
   const [renaming, setRenaming] = useState<Chat | null>(null);
   const [deleting, setDeleting] = useState<Chat | null>(null);
   const [organize, setOrganize] = usePersisted("chatvault.organize", "list");
+  const [closedProjects, setClosedProjects] = usePersisted<string[]>("chatvault.closedProjects", []);
 
   const say = useCallback((m: string) => sonner(m), []);
   useEffect(() => {
@@ -458,16 +459,25 @@ export default function App() {
                   </div>
                 )}
                 {organize === "project"
-                  ? groupByProject(recent).map(([project, list]) => (
-                      <div key={project} className="pt-1">
-                        <p className="flex items-center gap-1.5 px-2.5 pb-0.5 pt-1 text-xs text-muted-foreground">
-                          <FolderOpen className="size-3.5" strokeWidth={1.5} />
-                          <span className="min-w-0 flex-1 truncate">{project}</span>
-                          <span>{list.length}</span>
-                        </p>
-                        {list.map(row)}
-                      </div>
-                    ))
+                  ? groupByProject(recent).map(([project, list]) => {
+                      const isOpen = !closedProjects.includes(project);
+                      return (
+                        <Collapsible
+                          key={project}
+                          open={isOpen}
+                          onOpenChange={(o) => setClosedProjects((c) => (o ? c.filter((x) => x !== project) : [...c, project]))}
+                          className="pt-1"
+                        >
+                          <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground">
+                            <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
+                            <FolderOpen className="size-3.5 shrink-0" strokeWidth={1.5} />
+                            <span className="min-w-0 flex-1 truncate text-left">{project}</span>
+                            <span>{list.length}</span>
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="space-y-0.5">{list.map(row)}</CollapsibleContent>
+                        </Collapsible>
+                      );
+                    })
                   : recent.map(row)}
                 {hasMore && (
                   <div ref={sentinelRef}>
