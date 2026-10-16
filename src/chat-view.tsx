@@ -322,26 +322,10 @@ export function ChatView(p: Props) {
         </ScrollArea>
 
         {page && sampled.length >= 3 && (
-          <nav aria-label="Conversation" className="absolute left-3 top-1/2 z-10 flex max-h-[70%] -translate-y-1/2 flex-col gap-1.5 overflow-visible py-2">
-            {sampled.map((t) => {
-              const k = ticks.indexOf(t);
-              const active = k === activeTick;
-              const head = t.m.text.trim().split("\n")[0];
-              return (
-                <div key={t.i} className="group/tick relative flex h-2 items-center">
-                  <button
-                    aria-label={head}
-                    className={cn("h-0.5 rounded-full transition-all", active ? "w-5 bg-foreground" : "w-3 bg-muted-foreground/40 hover:w-5 hover:bg-foreground")}
-                    onClick={() => els.current[t.i]?.scrollIntoView({ block: "start", behavior: "smooth" })}
-                  />
-                  <div className="pointer-events-none absolute left-8 top-1/2 z-20 hidden w-72 -translate-y-1/2 rounded-xl border bg-popover p-3 text-popover-foreground shadow-md group-hover/tick:block">
-                    <p className="line-clamp-2 text-xs font-medium uppercase tracking-wide">{head}</p>
-                    <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{t.m.text.trim().slice(head.length).trim() || (t.m.ts ? fmtDate(Date.parse(t.m.ts)) : "")}</p>
-                  </div>
-                </div>
-              );
-            })}
-          </nav>
+          <ConversationBar
+            ticks={sampled.map((t) => ({ i: t.i, text: t.m.text, ts: t.m.ts, active: ticks.indexOf(t) === activeTick }))}
+            onPick={(i) => els.current[i]?.scrollIntoView({ block: "start", behavior: "smooth" })}
+          />
         )}
 
         {showJump && (
@@ -558,3 +542,77 @@ function MiniAction({ label, onClick, children }: { label: string; onClick: () =
   );
 }
 
+
+type BarTick = { i: number; text: string; ts: string; active: boolean };
+
+/**
+ * The strip of ticks beside the chat. Ticks swell like a wave around the pointer, and the
+ * closest one shows a preview of that question.
+ */
+function ConversationBar({ ticks, onPick }: { ticks: BarTick[]; onPick: (i: number) => void }) {
+  const navRef = useRef<HTMLElement | null>(null);
+  const tickRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [y, setY] = useState<number | null>(null);
+
+  // Distance from the pointer to every tick, measured when the pointer moves.
+  const navTop = navRef.current?.getBoundingClientRect().top ?? 0;
+  const centers = ticks.map((_, idx) => {
+    const r = tickRefs.current[idx]?.getBoundingClientRect();
+    return r ? r.top + r.height / 2 : null;
+  });
+  let nearest = -1;
+  let best = Infinity;
+  if (y !== null) {
+    centers.forEach((c, idx) => {
+      if (c === null) return;
+      const d = Math.abs(y - c);
+      if (d < best) {
+        best = d;
+        nearest = idx;
+      }
+    });
+  }
+  const near = ticks[nearest];
+  const head = near?.text.trim().split("\n")[0] ?? "";
+
+  return (
+    <nav
+      ref={navRef}
+      aria-label="Conversation"
+      className="absolute left-0 top-1/2 z-10 flex max-h-[70%] -translate-y-1/2 flex-col gap-1.5 py-3 pl-3 pr-5"
+      onMouseMove={(e) => setY(e.clientY)}
+      onMouseLeave={() => setY(null)}
+    >
+      {ticks.map((t, idx) => {
+        const c = centers[idx];
+        const d = y !== null && c !== null ? Math.abs(y - c) : Infinity;
+        const f = Math.exp(-Math.pow(d / 36, 2));
+        const width = (t.active ? 20 : 10) + 22 * f;
+        return (
+          <div
+            key={t.i}
+            ref={(el) => {
+              tickRefs.current[idx] = el;
+            }}
+            className="flex h-2 cursor-pointer items-center"
+            onClick={() => onPick(t.i)}
+          >
+            <div
+              className="rounded-full bg-foreground transition-[width,opacity,height] duration-100 ease-out"
+              style={{ width, height: 2 + 1.5 * f, opacity: t.active ? 1 : 0.28 + 0.72 * f }}
+            />
+          </div>
+        );
+      })}
+      {near && y !== null && centers[nearest] !== null && (
+        <div
+          className="pointer-events-none absolute left-full z-20 ml-1 w-72 rounded-xl border bg-popover p-3 text-popover-foreground shadow-md"
+          style={{ top: (centers[nearest] as number) - navTop, transform: "translateY(-50%)" }}
+        >
+          <p className="line-clamp-2 text-xs font-medium">{head}</p>
+          <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{near.text.trim().slice(head.length).trim() || (near.ts ? fmtDate(Date.parse(near.ts)) : "")}</p>
+        </div>
+      )}
+    </nav>
+  );
+}
