@@ -3,9 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
-  Bot,
   ChevronRight,
-  Clock,
   DatabaseBackup,
   Eye,
   FolderOpen,
@@ -13,7 +11,6 @@ import {
   ArrowUpDown,
   ListFilter,
   RotateCcw,
-  FileDown,
   LayoutDashboard,
   Loader2,
   MessagesSquare,
@@ -24,7 +21,6 @@ import {
   PinOff,
   RefreshCw,
   Search,
-  ShieldCheck,
   Sun,
   Users,
 } from "lucide-react";
@@ -44,6 +40,7 @@ import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
 import { accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { ChatView } from "@/chat-view";
+import { OverviewPage } from "@/overview";
 import { CommandPalette } from "@/command-palette";
 import {
   DropdownMenu,
@@ -57,7 +54,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { SidebarSkeleton, StatSkeleton } from "@/skeletons";
+import { SidebarSkeleton } from "@/skeletons";
 import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
 import { chatKey, useChatMeta, usePersisted } from "@/store";
 import { startAutoUpdate } from "@/updater";
@@ -520,7 +517,14 @@ export default function App() {
             <OverviewPage
               overview={overview}
               accountCount={new Set([...(overview.claude?.accounts ?? []), ...(overview.codex?.accounts ?? [])].map((a) => a.id)).size}
+              reloadKey={reloadKey}
+              titleOf={(c) => named(c).title}
+              onOpenChat={(c) => {
+                if (c.provider !== provider) setProvider(c.provider);
+                open(c);
+              }}
               onSync={() => setSyncOpen(true)}
+              onSearch={() => setPaletteOpen(true)}
             />
           ) : (
             <ChatView
@@ -734,80 +738,6 @@ const ChatRow = memo(function ChatRow({
     </div>
   );
 });
-
-function OverviewPage({ overview, accountCount, onSync }: { overview: Record<Provider, Overview | null>; accountCount: number; onSync: () => void }) {
-  const latest = Math.max(overview.claude?.latestMs ?? 0, overview.codex?.latestMs ?? 0);
-  const ready = overview.claude !== null && overview.codex !== null;
-  const stats = [
-    { icon: <ProviderLogo provider="claude" className="size-4" />, n: overview.claude?.total.toLocaleString(), label: "Claude chats" },
-    { icon: <ProviderLogo provider="codex" className="size-4" />, n: overview.codex?.total.toLocaleString(), label: "Codex chats" },
-    { icon: <Users className="size-4 text-muted-foreground" strokeWidth={1.5} />, n: ready ? String(accountCount) : undefined, label: "Accounts" },
-    { icon: <Clock className="size-4 text-muted-foreground" strokeWidth={1.5} />, n: ready ? (latest ? fmtDate(latest) : "None") : undefined, label: "Latest activity" },
-  ];
-  return (
-    <div className="flex flex-1 items-center justify-center overflow-auto p-6">
-      <div className="w-full max-w-xl space-y-5 text-center">
-        <div className="mx-auto flex size-12 items-center justify-center rounded-xl bg-muted">
-          <MessagesSquare className="size-6 text-muted-foreground" strokeWidth={1.25} />
-        </div>
-        <div className="space-y-1">
-          <h2 className="text-base font-medium">Pick a chat to read it</h2>
-          <p className="text-sm text-muted-foreground">Chats from Claude Code and Codex, across every account used on this computer, are listed on the left.</p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 text-left sm:grid-cols-4">
-          {stats.map((s) => (
-            <div key={s.label} className="rounded-lg border bg-card p-3">
-              <div className="mb-2">{s.icon}</div>
-              <div className="flex h-5 items-center">{s.n === undefined ? <StatSkeleton /> : <p className="truncate text-sm font-medium">{s.n}</p>}</div>
-              <p className="text-xs text-muted-foreground">{s.label}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex items-start gap-3 rounded-lg border p-3 text-left">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <ShieldCheck className="size-4 text-muted-foreground" strokeWidth={1.5} />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-medium">Your chats stay on your desktop</p>
-            <p className="text-xs text-muted-foreground">Private to you. Nothing is uploaded.</p>
-          </div>
-        </div>
-
-        <div className="space-y-2 text-left">
-          {[
-            { icon: Search, title: "Search inside chats", text: "Type a word and press Enter to search the full text of every chat." },
-            { icon: Bot, title: "Continue anywhere", text: "Use the three dots on a chat to continue it in Claude Code or Codex, even from another account." },
-            { icon: FileDown, title: "Keep a copy", text: "Save any chat as a Markdown file or a handoff file." },
-          ].map((s) => (
-            <div key={s.title} className="flex items-start gap-3 rounded-lg border p-3">
-              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-                <s.icon className="size-4 text-muted-foreground" strokeWidth={1.5} />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-medium">{s.title}</p>
-                <p className="text-xs text-muted-foreground">{s.text}</p>
-              </div>
-            </div>
-          ))}
-          <div className="flex items-start gap-3 rounded-lg border p-3">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-              <DatabaseBackup className="size-4 text-muted-foreground" strokeWidth={1.5} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">Back up to Documents</p>
-              <p className="text-xs text-muted-foreground">Copy all chats to a folder so they survive a reinstall or sign-out.</p>
-            </div>
-            <Button size="sm" variant="outline" onClick={onSync}>
-              Sync
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function Tip({ label, children }: { label: string; children: ReactNode }) {
   return (
