@@ -2,7 +2,7 @@
 
 <img src="app-icon.png" alt="ChatVault" width="96" height="96" />
 
-# ChatVault
+# ChatVault - 3.57 MB Only.
 
 **One place to read, search, back up and continue every AI coding chat on your PC.**
 
