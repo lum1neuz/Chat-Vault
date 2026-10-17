@@ -18,6 +18,11 @@ Claude Code · Codex · Cursor — across every account you have ever signed in 
 
 </div>
 
+<p align="center">
+  <img src="docs/screenshots/01-overview.png" alt="ChatVault overview with sample data" width="900" />
+</p>
+<p align="center"><sub>All screenshots use sample data, not real chats.</sub></p>
+
 ---
 
 ## Why ChatVault?
@@ -44,27 +49,84 @@ Requires Windows 10 or 11 (64-bit). The installers are small (about 3 to 4 MB) a
 
 ### Read everything in one place
 
+<p align="center">
+  <img src="docs/screenshots/02-codex-chats.png" alt="Codex chats tab" width="440" />
+  <img src="docs/screenshots/04-accounts.png" alt="Account dropdown" width="440" />
+</p>
+
 - **Claude Code, Codex and Cursor** in a single list, with a tab for each tool.
-- **Every account at once.** A dropdown filters by account and shows the email when it is known.
-- **Built for huge histories.** Chats come from a local SQLite index and load 20 at a time as you scroll. Re-scanning only reads files that changed, and a 240 MB chat opens in about two seconds.
+- **Every account at once.** The account dropdown filters by account and shows the email when it is known.
+- **Built for huge histories.** Chats come from a local SQLite index and load 20 at a time as you scroll. Re-scanning only reads files that changed.
 - **Pinned and Recents**, sort and filter menus, grouping by project, and your own chat names. All of it is remembered between launches.
+- **Search** (`Ctrl+K`) finds chats and actions, and the sidebar search looks inside every message.
 
-### A chat view that is easy to read
+<p align="center">
+  <img src="docs/screenshots/05-search.png" alt="Searching chats" width="600" />
+</p>
 
-- Message bubbles with copy actions, code blocks with syntax highlighting and a copy button.
+### A chat view that stays fast and is easy to read
+
+<p align="center">
+  <img src="docs/screenshots/06-chat-markdown-code.png" alt="A chat with markdown, tables and code" width="900" />
+</p>
+
+- **A chat opens on its latest messages.** Only the messages on screen are drawn (virtualized), so even a chat with thousands of messages scrolls smoothly. Earlier messages load as you scroll up to them, or with **Load earlier messages**.
+- Markdown, tables, task lists and **code blocks with syntax highlighting**, a copy button and horizontal scrolling for long lines.
 - Tool use is collapsed into tidy **steps**: terminal commands with their output, plans and to-do lists, sub-agent runs, web sources, reasoning and error stack traces.
 - Links become **inline citations** with a hover preview.
-- A **conversation bar** beside the chat shows every question you asked. It swells like a wave under your pointer and previews the question you are about to jump to.
-- **Find in chat** (`Ctrl+F`) with highlighted matches, and **global search** (`Ctrl+K`) across both chats and actions.
-- Long chats load their newest messages first, with **Load earlier messages** when you want more.
+- **Find in chat** (`Ctrl+F`) with highlighted matches and next or previous buttons.
 
-### Continue the work anywhere
+### Jump anywhere with the timeline
+
+<p align="center">
+  <img src="docs/screenshots/08-timeline.png" alt="Conversation timeline" width="720" />
+</p>
+
+A **conversation timeline** beside the chat shows every question you asked, even in messages that are not loaded yet. It swells like a wave under your pointer, previews the question you are about to jump to, and takes you straight there when you click.
+
+### Live, as the agent works
+
+<p align="center">
+  <img src="docs/screenshots/07-chat-latest-live.png" alt="A chat with an agent working" width="720" />
+</p>
+
+- The open chat **updates in real time**: new messages appear at the bottom while you scroll up or down, and you stay where you are.
+- A **green dot** on the chat in the sidebar and in its header, plus a "working" indicator at the end of the conversation, show when an agent is writing to it.
+- New conversations from Claude Code, Codex and Cursor **appear in the list on their own**.
+
+### Pictures in chats
+
+<p align="center">
+  <img src="docs/screenshots/09-image-viewer.png" alt="Full-screen image viewer" width="720" />
+</p>
+
+Pictures you pasted into a chat show up in the conversation with **hover actions** (full screen, copy, download). The full-screen viewer slides between every picture in the chat with the arrow keys.
+
+### Continue and fork the work
+
+<p align="center">
+  <img src="docs/screenshots/10-actions-menu.png" alt="The Actions menu" width="440" />
+  <img src="docs/screenshots/11-chat-row-menu.png" alt="The chat row menu" width="440" />
+</p>
 
 - **Continue in Claude Code** (`claude --resume`) or **in Codex** (`codex resume`) with one click. It works for chats from other accounts too, because the transcript is read straight from disk.
 - **Continue in the other tool.** A Claude chat can continue in Codex and the other way round. ChatVault writes a *handoff file* with the whole conversation and starts the other tool with a prompt to read it, so no context is lost.
-- Fork a chat as a copy, open the project folder, copy ready-made PowerShell commands, or export a chat as Markdown.
+- **Fork chat** makes a copy of the chat next to the original and opens it right away, with no terminal. The original is never touched.
+- Open the project folder, copy ready-made PowerShell commands, show the transcript file, or save a chat as Markdown. Every chat in the sidebar has the same menu.
+
+### Filters and sorting
+
+<p align="center">
+  <img src="docs/screenshots/12-filters-menu.png" alt="The filters menu" width="440" />
+</p>
+
+Organize the sidebar by project or by date, sort by recent, oldest, title or size, and choose what each row shows.
 
 ### Never lose a chat
+
+<p align="center">
+  <img src="docs/screenshots/13-sync-backup.png" alt="Sync and backup dialog" width="720" />
+</p>
 
 - **Sync & backup** copies Claude and Codex chats to `Documents\ChatVault Backup`. ChatVault also reads that folder, so your chats stay visible after you sign out or reinstall.
 - **Restore missing** copies back only the chats that are gone, so Claude and Codex can list them again. It never overwrites or deletes anything.
@@ -72,7 +134,15 @@ Requires Windows 10 or 11 (64-bit). The installers are small (about 3 to 4 MB) a
 
 ### An overview that tells you something
 
-Chats per tool, activity for the last 14 days, your busiest projects, space used on disk, backup status and a quick way back into your latest chats.
+Chats per tool, activity for the last 14 days, space used on disk, backup status and a quick way back into your latest chats.
+
+### Made for Windows
+
+A custom title bar with your own window controls, a start screen, light and dark themes, and an installer of about 3 to 4 MB that uses the WebView2 runtime already on Windows.
+
+<p align="center">
+  <img src="docs/screenshots/14-light-theme.png" alt="Light theme" width="720" />
+</p>
 
 ## Supported tools
 
@@ -80,7 +150,7 @@ Chats per tool, activity for the last 14 days, your busiest projects, space used
 | --- | --- | --- | --- |
 | **Claude Code** | Terminal and desktop-app chats | Resume, fork, handoff to Codex | Titles and accounts come from the Claude desktop app's session files |
 | **Codex** | Current and compressed (`.jsonl.zst`) chats | Resume, fork, handoff to Claude | Thread names come from `session_index.jsonl` |
-| **Cursor** | IDE chats in the older format, and Cursor CLI chats | Handoff to Claude or Codex | Newer Cursor agent chats are encrypted by Cursor and cannot be read from outside it |
+| **Cursor** | IDE chats and Cursor CLI chats, including conversations Cursor has only just written | Handoff to Claude or Codex | Some Cursor agent chats are encrypted by Cursor and cannot be read from outside it |
 
 ## How it works
 
@@ -98,7 +168,7 @@ flowchart LR
 
 1. **Scan.** A Rust scanner reads the places each tool stores chats. Only new or changed files are parsed again.
 2. **Index.** Titles, projects, accounts and times go into a local SQLite database with full-text search.
-3. **Read on demand.** A chat is parsed only when you open it, one window of messages at a time.
+3. **Read on demand.** A chat is parsed only when you open it, newest messages first, and the page stays in sync with the file while an agent is writing to it.
 
 ## Privacy
 
@@ -132,8 +202,8 @@ The installers appear in `src-tauri/target/release/bundle/`. To produce the sign
 Update the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, then push a matching tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The [release workflow](.github/workflows/release.yml) builds the `.msi`, the setup `.exe` and a portable `.exe`, signs the update bundles and publishes everything, including the `latest.json` that installed copies use to update themselves.
