@@ -49,26 +49,13 @@ Requires Windows 10 or 11 (64-bit). The installers are small (about 3 to 4 MB) a
 
 ### Read everything in one place
 
-<p align="center">
-  <img src="docs/screenshots/02-codex-chats.png" alt="Codex chats tab" width="440" />
-  <img src="docs/screenshots/04-accounts.png" alt="Account dropdown" width="440" />
-</p>
-
 - **Claude Code, Codex and Cursor** in a single list, with a tab for each tool.
 - **Every account at once.** The account dropdown filters by account and shows the email when it is known.
 - **Built for huge histories.** Chats come from a local SQLite index and load 20 at a time as you scroll. Re-scanning only reads files that changed.
 - **Pinned and Recents**, sort and filter menus, grouping by project, and your own chat names. All of it is remembered between launches.
 - **Search** (`Ctrl+K`) finds chats and actions, and the sidebar search looks inside every message.
 
-<p align="center">
-  <img src="docs/screenshots/05-search.png" alt="Searching chats" width="600" />
-</p>
-
 ### A chat view that stays fast and is easy to read
-
-<p align="center">
-  <img src="docs/screenshots/06-chat-markdown-code.png" alt="A chat with markdown, tables and code" width="900" />
-</p>
 
 - **A chat opens on its latest messages.** Only the messages on screen are drawn (virtualized), so even a chat with thousands of messages scrolls smoothly. Earlier messages load as you scroll up to them, or with **Load earlier messages**.
 - Markdown, tables, task lists and **code blocks with syntax highlighting**, a copy button and horizontal scrolling for long lines.
@@ -78,17 +65,9 @@ Requires Windows 10 or 11 (64-bit). The installers are small (about 3 to 4 MB) a
 
 ### Jump anywhere with the timeline
 
-<p align="center">
-  <img src="docs/screenshots/08-timeline.png" alt="Conversation timeline" width="720" />
-</p>
-
 A **conversation timeline** beside the chat shows every question you asked, even in messages that are not loaded yet. It swells like a wave under your pointer, previews the question you are about to jump to, and takes you straight there when you click.
 
 ### Live, as the agent works
-
-<p align="center">
-  <img src="docs/screenshots/07-chat-latest-live.png" alt="A chat with an agent working" width="720" />
-</p>
 
 - The open chat **updates in real time**: new messages appear at the bottom while you scroll up or down, and you stay where you are.
 - A **green dot** on the chat in the sidebar and in its header, plus a "working" indicator at the end of the conversation, show when an agent is writing to it.
@@ -96,18 +75,9 @@ A **conversation timeline** beside the chat shows every question you asked, even
 
 ### Pictures in chats
 
-<p align="center">
-  <img src="docs/screenshots/09-image-viewer.png" alt="Full-screen image viewer" width="720" />
-</p>
-
 Pictures you pasted into a chat show up in the conversation with **hover actions** (full screen, copy, download). The full-screen viewer slides between every picture in the chat with the arrow keys.
 
 ### Continue and fork the work
-
-<p align="center">
-  <img src="docs/screenshots/10-actions-menu.png" alt="The Actions menu" width="440" />
-  <img src="docs/screenshots/11-chat-row-menu.png" alt="The chat row menu" width="440" />
-</p>
 
 - **Continue in Claude Code** (`claude --resume`) or **in Codex** (`codex resume`) with one click. It works for chats from other accounts too, because the transcript is read straight from disk.
 - **Continue in the other tool.** A Claude chat can continue in Codex and the other way round. ChatVault writes a *handoff file* with the whole conversation and starts the other tool with a prompt to read it, so no context is lost.
@@ -116,17 +86,9 @@ Pictures you pasted into a chat show up in the conversation with **hover actions
 
 ### Filters and sorting
 
-<p align="center">
-  <img src="docs/screenshots/12-filters-menu.png" alt="The filters menu" width="440" />
-</p>
-
 Organize the sidebar by project or by date, sort by recent, oldest, title or size, and choose what each row shows.
 
 ### Never lose a chat
-
-<p align="center">
-  <img src="docs/screenshots/13-sync-backup.png" alt="Sync and backup dialog" width="720" />
-</p>
 
 - **Sync & backup** copies Claude and Codex chats to `Documents\ChatVault Backup`. ChatVault also reads that folder, so your chats stay visible after you sign out or reinstall.
 - **Restore missing** copies back only the chats that are gone, so Claude and Codex can list them again. It never overwrites or deletes anything.
@@ -139,10 +101,6 @@ Chats per tool, activity for the last 14 days, space used on disk, backup status
 ### Made for Windows
 
 A custom title bar with your own window controls, a start screen, light and dark themes, and an installer of about 3 to 4 MB that uses the WebView2 runtime already on Windows.
-
-<p align="center">
-  <img src="docs/screenshots/14-light-theme.png" alt="Light theme" width="720" />
-</p>
 
 ## Supported tools
 
