@@ -33,6 +33,8 @@ pub struct ChatSummary {
     pub model: Option<String>,
     pub has_metadata: bool,
     pub backup: bool,
+    /// Moved to the archive inside ChatVault. Nothing outside ChatVault changes.
+    pub user_archived: bool,
 }
 
 #[derive(Serialize)]
@@ -75,6 +77,8 @@ pub fn open_db() -> Result<Connection, String> {
            last_ms INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL,
            mtime INTEGER NOT NULL, path TEXT NOT NULL, model TEXT, has_meta INTEGER NOT NULL DEFAULT 0,
            backup INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(provider, id));
+         CREATE TABLE IF NOT EXISTS user_archive(provider TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(provider, id));
+         CREATE TABLE IF NOT EXISTS backed_up(provider TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(provider, id));
          CREATE INDEX IF NOT EXISTS chats_last ON chats(provider, last_ms DESC);
          CREATE INDEX IF NOT EXISTS chats_acct ON chats(provider, account, last_ms DESC);
          CREATE UNIQUE INDEX IF NOT EXISTS chats_path ON chats(path);
@@ -254,6 +258,21 @@ fn first_user_text(provider: &str, path: &Path, max_lines: usize) -> Option<Stri
     None
 }
 
+/// The folder a Claude chat ran in, read from the transcript itself, for chats the desktop app has no record of.
+fn transcript_cwd(path: &Path) -> Option<String> {
+    for line in open_lines(path)?.take(80) {
+        if !line.contains("\"cwd\"") {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
+                return Some(c.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn build_row(
     f: &Found,
     size: i64,
@@ -285,12 +304,14 @@ fn build_row(
                     model: m.model.clone(),
                     has_metadata: true,
                     backup: f.backup,
+                    user_archived: false,
                 },
                 mtime,
                 preview: preview.unwrap_or_default(),
             });
         }
         let title = clip(preview.as_deref()?.trim(), 80);
+        let cwd = transcript_cwd(&f.path);
         return Some(Row {
             s: ChatSummary {
                 provider: "claude".into(),
@@ -298,8 +319,8 @@ fn build_row(
                 local_id: None,
                 title,
                 account: "unknown".into(),
-                project: friendly_dir(&dir_name),
-                cwd: None,
+                project: project_of(&cwd, &friendly_dir(&dir_name)),
+                cwd,
                 created_ms: None,
                 last_ms: mtime,
                 archived: false,
@@ -308,6 +329,7 @@ fn build_row(
                 model: None,
                 has_metadata: false,
                 backup: f.backup,
+                    user_archived: false,
             },
             mtime,
             preview: preview.unwrap_or_default(),
@@ -352,6 +374,7 @@ fn build_row(
             model: p.get("model_provider").and_then(|x| x.as_str()).map(String::from),
             has_metadata: true,
             backup: f.backup,
+                    user_archived: false,
         },
         mtime,
         preview: preview.unwrap_or_default(),
@@ -404,6 +427,8 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         let mut c = open_db()?;
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
+        // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
+        let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND has_meta=0 AND cwd IS NULL", []);
         let files = collect_files();
         let known: HashMap<String, (i64, i64)> = {
             let mut st = c.prepare("SELECT path,size,mtime FROM chats").map_err(|e| e.to_string())?;
@@ -425,6 +450,19 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             let _ = tx.execute("DELETE FROM chats WHERE path=?1", params![path]);
         }
         tx.commit().map_err(|e| e.to_string())?;
+
+        // Remember which chats have a backup copy, so the Backup filter can list all of them, not only the ones whose original is gone.
+        {
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            let _ = tx.execute("DELETE FROM backed_up", []);
+            for f in files.iter().filter(|f| f.backup) {
+                let stem = f.path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let stem = stem.trim_end_matches(".jsonl").to_string();
+                let id = if f.provider == "codex" && stem.len() >= 36 { stem[stem.len() - 36..].to_string() } else { stem };
+                let _ = tx.execute("INSERT OR IGNORE INTO backed_up(provider,id) VALUES(?1,?2)", params![f.provider, id]);
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
 
         // Live files first so a live copy always wins over its backup.
         let mut todo: Vec<&Found> = Vec::new();
@@ -487,6 +525,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                         model: None,
                         has_metadata: true,
                         backup: false,
+                        user_archived: false,
                     },
                     mtime: fp,
                     preview: ch.title,
@@ -532,10 +571,11 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<ChatSummary> {
         model: r.get(12)?,
         has_metadata: r.get::<_, i64>(13)? != 0,
         backup: r.get::<_, i64>(14)? != 0,
+        user_archived: r.get::<_, i64>(15)? != 0,
     })
 }
 
-const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup";
+const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=chats.provider AND u.id=chats.id)";
 
 pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limit: i64, sort: &str, scope: &str) -> Result<Page, String> {
     let c = open_db()?;
@@ -543,10 +583,12 @@ pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limi
     let like = format!("%{}%", q.trim().replace('%', "").replace('_', ""));
     let fts = fts_expr(q);
     let scope_sql = match scope {
-        "live" => " AND backup=0",
-        "backup" => " AND backup=1",
-        "archived" => " AND archived=1",
-        _ => "",
+        "live" => " AND backup=0 AND NOT (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))",
+        // Every chat that has a copy in the backup folder, whether or not the original still exists.
+        "backup" => " AND (backup=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM backed_up))",
+        "archived" => " AND (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))",
+        // The normal lists leave out chats you archived in ChatVault.
+        _ => " AND (provider||':'||id) NOT IN (SELECT provider||':'||id FROM user_archive)",
     };
     let order_sql = match sort {
         "oldest" => "last_ms ASC",
@@ -620,6 +662,17 @@ pub fn by_ids(provider: &str, ids: &[String]) -> Result<Vec<ChatSummary>, String
 }
 
 /// Drops a chat from the index after its file was removed.
+/// Moves a chat to the archive (or back). The chat file and the other apps are never touched.
+pub fn set_archived(provider: &str, id: &str, archived: bool) -> Result<(), String> {
+    let c = open_db()?;
+    if archived {
+        c.execute("INSERT OR IGNORE INTO user_archive(provider,id) VALUES(?1,?2)", params![provider, id]).map_err(|e| e.to_string())?;
+    } else {
+        c.execute("DELETE FROM user_archive WHERE provider=?1 AND id=?2", params![provider, id]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn forget(path: &str) -> Result<(), String> {
     let c = open_db()?;
     c.execute(

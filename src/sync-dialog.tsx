@@ -29,7 +29,7 @@ export function SyncDialog({
   const [busy, setBusy] = useState<"sync" | "restore" | null>(null);
   const [prog, setProg] = useState<Prog | null>(null);
   const [last, setLast] = useState<string | null>(null);
-  const [auto, setAuto] = useState(() => localStorage.getItem(AUTO_SYNC_KEY) === "1");
+  const [auto, setAuto] = useState(() => localStorage.getItem(AUTO_SYNC_KEY) !== "0");
 
   const load = useCallback(() => {
     invoke<Status>("backup_status").then(setStatus).catch(() => {});
@@ -124,8 +124,8 @@ export function SyncDialog({
               <RefreshCw className="size-4 text-muted-foreground" strokeWidth={1.5} />
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">Sync when ChatVault opens</p>
-              <p className="text-xs text-muted-foreground">Only new and changed chats are copied.</p>
+              <p className="text-sm font-medium">Keep backing up automatically</p>
+              <p className="text-xs text-muted-foreground">Syncs when ChatVault opens and every 10 minutes. Only new and changed chats are copied.</p>
             </div>
             <Switch
               checked={auto}

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
   Bot,
   Copy,
@@ -34,6 +35,7 @@ export type Chat = {
   model: string | null;
   hasMetadata: boolean;
   backup: boolean;
+  userArchived?: boolean;
 };
 export type Msg = {
   role: "user" | "assistant";
@@ -70,12 +72,25 @@ export const fmtSize = (b: number) =>
       : `${Math.max(1, Math.round(b / 1024))} KB`;
 
 let accountEmails: Record<string, string> = {};
+let desktopAccounts: Set<string> | null = null;
 export const setAccountNames = (list: AccountInfo[]) => {
   accountEmails = Object.fromEntries(list.filter((a) => a.email).map((a) => [a.id, a.email as string]));
+  // The Claude app can only open chats that belong to the account it is signed in to right now.
+  desktopAccounts = new Set(list.filter((a) => a.desktopCurrent).map((a) => a.id));
 };
 /** The email when it is known, otherwise the first 8 characters of the account id. */
 export const accountLabel = (a: string) =>
   a === "unknown" ? "Unknown account" : a === "local" ? "This computer" : (accountEmails[a] ?? `Account ${a.slice(0, 8)}`);
+
+/** Asks where to save with the system Save dialog, then writes the file there. Returns false if the user cancels. */
+async function saveWithDialog(name: string, content: string, toast: (m: string) => void) {
+  const safe = name.replace(/[\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chat";
+  const path = await save({ defaultPath: `${safe}.md`, filters: [{ name: "Markdown", extensions: ["md"] }] });
+  if (!path) return false;
+  await invoke("write_text_file", { path, content });
+  toast("Saved");
+  return true;
+}
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
@@ -253,7 +268,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       },
     },
   ];
-  if (isClaude && chat.localId) {
+  if (isClaude && chat.localId && (!desktopAccounts || desktopAccounts.size === 0 || desktopAccounts.has(chat.account))) {
     list.push({
       id: "open",
       label: "Open in Claude app",
@@ -320,23 +335,21 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
     {
       id: "save-md",
       label: "Save as .md",
-      hint: "Saves to Desktop / Claude Chats.",
+      hint: "Choose where to save the conversation.",
       icon: FileDown,
       group: "Save",
       run: async () => {
-        await invoke("save_markdown", { title: chat.title, markdown: toMarkdown(chat, await allMsgs()) });
-        toast("Saved to Desktop / Claude Chats");
+        await saveWithDialog(chat.title, toMarkdown(chat, await allMsgs()), toast);
       },
     },
     {
       id: "save-handoff",
       label: "Save handoff file",
-      hint: "Saves the AI handoff file to Documents / ChatVault Handoffs.",
+      hint: "Choose where to save a file another AI can read to continue this chat.",
       icon: FileText,
       group: "Save",
       run: async () => {
-        await prepareHandoff(chat);
-        toast("Saved to Documents / ChatVault Handoffs");
+        await saveWithDialog(`${chat.title} - handoff`, buildHandoff(chat, await allMsgs()), toast);
       },
     },
   );
@@ -426,23 +439,21 @@ function cursorActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatActio
     {
       id: "save-md",
       label: "Save as .md",
-      hint: "Saves to Desktop / Claude Chats.",
+      hint: "Choose where to save the conversation.",
       icon: FileDown,
       group: "Save",
       run: async () => {
-        await invoke("save_markdown", { title: chat.title, markdown: toMarkdown(chat, await allMsgs()) });
-        toast("Saved to Desktop / Claude Chats");
+        await saveWithDialog(chat.title, toMarkdown(chat, await allMsgs()), toast);
       },
     },
     {
       id: "save-handoff",
       label: "Save handoff file",
-      hint: "Saves the AI handoff file to Documents / ChatVault Handoffs.",
+      hint: "Choose where to save a file another AI can read to continue this chat.",
       icon: FileText,
       group: "Save",
       run: async () => {
-        await prepareHandoff(chat);
-        toast("Saved to Documents / ChatVault Handoffs");
+        await saveWithDialog(`${chat.title} - handoff`, buildHandoff(chat, await allMsgs()), toast);
       },
     },
   );

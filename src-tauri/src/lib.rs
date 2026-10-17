@@ -693,6 +693,24 @@ fn open_in_claude(local_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes a text file to a path the user picked in the system Save dialog. Only .md and .txt files are written.
+#[tauri::command]
+fn set_chat_archived(provider: String, id: String, archived: bool) -> Result<(), String> {
+    provider_ok(&provider)?;
+    index::set_archived(&provider, &id, archived)
+}
+
+#[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let ok = p.extension().map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("txt")).unwrap_or(false);
+    if !ok {
+        return Err("Only .md and .txt files can be saved here".into());
+    }
+    fs::write(&p, content).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 #[tauri::command]
 fn save_markdown(title: String, markdown: String) -> Result<String, String> {
     let dir = home().ok_or("No user profile")?.join("Desktop").join("Claude Chats");
@@ -762,11 +780,31 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         _ => return Err("Unknown agent".into()),
     };
     use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    Command::new("powershell")
-        .args(["-NoLogo", "-NoExit", "-Command", &script])
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // The terminal is started through `cmd /c start`, so it is not a child of ChatVault. It then stays open when
+    // ChatVault restarts, for example on every hot reload while developing, or when the app is closed.
+    let encoded = {
+        use std::fmt::Write;
+        let bytes: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for c in bytes.chunks(3) {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            let _ = out.write_char(T[(n >> 18 & 63) as usize] as char);
+            let _ = out.write_char(T[(n >> 12 & 63) as usize] as char);
+            let _ = out.write_char(if c.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
+            let _ = out.write_char(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        }
+        out
+    };
+    Command::new("cmd")
+        .arg("/C")
+        .arg("start")
+        .arg("")
+        .arg("powershell")
+        .args(["-NoLogo", "-NoExit", "-EncodedCommand", &encoded])
         .current_dir(dir)
-        .creation_flags(CREATE_NEW_CONSOLE)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -837,9 +875,62 @@ async fn backup_status() -> Result<sync::BackupStatus, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+            use tauri::{Emitter, Manager};
+            fn show(app: &tauri::AppHandle) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+            let open = MenuItem::with_id(app, "open", "Open ChatVault", true, None::<&str>)?;
+            let sync = MenuItem::with_id(app, "sync", "Sync & backup now", true, None::<&str>)?;
+            let rescan = MenuItem::with_id(app, "rescan", "Scan for new chats", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit ChatVault", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &sync, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
+            let mut tray = TrayIconBuilder::with_id("main")
+                .tooltip("ChatVault")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, e| match e.id.as_ref() {
+                    "open" => show(app),
+                    "sync" => {
+                        show(app);
+                        let _ = app.emit("tray-sync", ());
+                    }
+                    "rescan" => {
+                        let _ = app.emit("tray-rescan", ());
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, e| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                        show(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            Ok(())
+        })
+        // Closing the window keeps ChatVault running in the tray, so backups and live sync carry on. Quit from the tray menu.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             refresh_index,
             query_chats,
@@ -854,6 +945,8 @@ pub fn run() {
             cursor_fingerprint,
             files_fingerprint,
             send_message,
+            write_text_file,
+            set_chat_archived,
             agent_running,
             take_agent_error,
             agent_login,

@@ -5,10 +5,43 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ChatVault</title>
+    <script>
+      // Paint the right background before anything else loads, so the window never flashes white.
+      (function () {
+        var light = false;
+        try { light = localStorage.getItem("theme") === "light"; } catch (e) {}
+        var d = document.documentElement;
+        if (!light) d.classList.add("dark");
+        d.style.background = light ? "#ffffff" : "#0a0a0a";
+        d.style.colorScheme = light ? "light" : "dark";
+      })();
+    </script>
+    <link rel="preload" href="/fonts/geist-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <style>
+      @font-face { font-family: "Geist Variable"; font-style: normal; font-display: block; font-weight: 100 900; src: url("/fonts/geist-latin-wght-normal.woff2") format("woff2-variations"); }
+      html, body { margin: 0; height: 100%; }
+      #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; font-family: "Geist Variable", sans-serif; font-weight: 400; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; background: #0a0a0a; color: #a1a1aa; }
+      .light #boot, html:not(.dark) #boot { background: #ffffff; color: #71717a; }
+      #boot svg { width: 64px; height: 64px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.35), 0 0 0 1px rgba(128,128,128,.25); animation: bootpulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+      #boot p { margin: 0; font-size: 14px; line-height: 20px; font-weight: 400; }
+      @keyframes bootpulse { 50% { opacity: .5; } }
+    </style>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot" aria-busy="true" aria-label="Starting ChatVault">
+        <svg viewBox="0 0 1024 1024" aria-hidden="true">
+          <rect width="1024" height="1024" rx="230" fill="#18181b" />
+          <rect x="196" y="230" width="632" height="410" rx="110" fill="#fafafa" />
+          <polygon points="330,610 330,800 500,630" fill="#fafafa" />
+          <circle cx="352" cy="435" r="44" fill="#18181b" />
+          <circle cx="512" cy="435" r="44" fill="#18181b" />
+          <circle cx="672" cy="435" r="44" fill="#18181b" />
+        </svg>
+        <p>Getting your chats ready…</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
+  ArchiveRestore,
   ChevronRight,
   DatabaseBackup,
   Eye,
@@ -159,12 +160,21 @@ export default function App() {
     if (!isTauri) return;
     const un = listen<IndexProg>("index-progress", (e) => setIndexing(e.payload.phase === "Done" ? null : e.payload));
     void (async () => {
-      if (localStorage.getItem(AUTO_SYNC_KEY) === "1") await invoke("sync_chats").catch(() => {});
+      // Backing up is on unless you turned it off: once at start, then every 10 minutes while ChatVault is open.
+      if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") await invoke("sync_chats").catch(() => {});
       await rescan();
     })();
+    const every = window.setInterval(() => {
+      if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") void invoke("sync_chats").then(() => rescan()).catch(() => {});
+    }, 10 * 60 * 1000);
     const stopUpdates = startAutoUpdate();
+    const offSync = listen("tray-sync", () => setSyncOpen(true));
+    const offScan = listen("tray-rescan", () => void rescan());
     return () => {
       void un.then((f) => f());
+      void offSync.then((f) => f());
+      void offScan.then((f) => f());
+      window.clearInterval(every);
       stopUpdates();
     };
   }, [rescan]);
@@ -582,8 +592,28 @@ export default function App() {
       danger: true,
       run: async () => setDeleting(c),
     },
+    {
+      id: "archive",
+      label: c.userArchived ? "Unarchive" : "Archive",
+      hint: c.userArchived ? "Moves this chat back to your list." : "Moves this chat out of your list into Archived. Nothing is deleted.",
+      icon: c.userArchived ? ArchiveRestore : Archive,
+      group: "Chat",
+      run: async () => archive(c),
+    },
     { id: "rename", label: "Rename", hint: "Give this chat your own name. The original is not changed.", icon: Pencil, group: "Chat", run: async () => setRenaming(c) },
   ] as ChatAction[]).filter((a) => !(a.id === "delete" && c.provider === "cursor")));
+
+  const archive = async (c: Chat) => {
+    const to = !c.userArchived;
+    try {
+      await invoke("set_chat_archived", { provider: c.provider, id: c.id, archived: to });
+      say(to ? "Moved to Archived" : "Moved back to your list");
+      if (selected?.id === c.id && selected.provider === c.provider) setSelected(to && scope !== "archived" ? { ...c, userArchived: to } : { ...c, userArchived: to });
+      await quietReload();
+    } catch (e) {
+      say(String(e));
+    }
+  };
 
   const row = (c: Chat) => (
     <ChatRow
@@ -627,16 +657,11 @@ export default function App() {
             <div data-tauri-drag-region className="flex h-14 shrink-0 items-center gap-1 pl-3 pr-14">
               <button
                 onClick={() => setSelected(null)}
-                className="flex min-w-0 flex-1 cursor-default items-center gap-2.5 p-1 text-left outline-none"
+                className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 p-1 text-left outline-none"
               >
                 <AppLogo className="size-7 shrink-0 rounded-lg ring-1 ring-border" />
                 <div className="min-w-0">
                   <h1 className="truncate text-base font-medium leading-tight">ChatVault</h1>
-                  {indexing && (
-                    <p className="truncate text-xs text-muted-foreground">
-                      {indexing.total ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()}` : "Scanning this PC…"}
-                    </p>
-                  )}
                 </div>
               </button>
             </div>
@@ -669,7 +694,7 @@ export default function App() {
                 <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} align="start" sideOffset={6}>
                 {Object.entries(accountItems).map(([id, label]) => (
                   <SelectItem key={id} value={id}>
                     {label}
@@ -783,6 +808,7 @@ export default function App() {
           {!selected ? (
             <OverviewPage
               actions={controls}
+              indexing={indexing}
               userName={accountInfo.find((a) => a.cliCurrent)?.name ?? undefined}
               overview={overview}
               accountCount={new Set([...(overview.claude?.accounts ?? []), ...(overview.codex?.accounts ?? [])].map((a) => a.id)).size}
@@ -811,6 +837,7 @@ export default function App() {
               onToggleHeader={() => setHeaderOpen((o) => !o)}
               pinned={pinSet.has(chatKey(selected))}
               onTogglePin={() => togglePin(chatKey(selected))}
+              onArchive={() => void archive(selected)}
               onRename={() => setRenaming(selected)}
               onDelete={() => setDeleting(selected)}
               toast={say}
@@ -1119,7 +1146,7 @@ function RenameDialog({ chat, current, onClose, onSave }: { chat: Chat | null; c
   );
 }
 
-const QUICK = ["continue-claude", "continue-codex", "open", "reveal", "copy-md"];
+const QUICK = ["continue-claude", "continue-codex", "fork", "folder", "copy-id"];
 
 function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string) => void; msgs: Msg[] | null; extras: ChatAction[] }) {
   const [open, setOpen] = useState(false);
@@ -1135,8 +1162,8 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
       window.removeEventListener("resize", close);
     };
   }, [open]);
-  const groups = ["Chat", "Continue", "More"] as const;
-  const inGroup = (a: ChatAction, g: string) => (g === "More" ? ["Open", "Copy", "Save"].includes(a.group) : a.group === g);
+  const groups = ["Chat", "Continue", "Open", "Copy", "Save"] as const;
+  const inGroup = (a: ChatAction, g: string) => a.group === g;
   const renderItem = (a: ChatAction) => {
     const Icon = a.icon;
     return (

@@ -4,6 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   Archive,
+  ArchiveRestore,
   ArrowDown,
   Check,
   ChevronDown,
@@ -71,6 +72,7 @@ type Props = {
   onToggleHeader: () => void;
   pinned: boolean;
   onTogglePin: () => void;
+  onArchive?: () => void;
   onRename: () => void;
   onDelete: () => void;
   toast: (m: string) => void;
@@ -512,7 +514,7 @@ export function ChatView(p: Props) {
               </Tip>
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-              <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} />
+              <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} onArchive={p.onArchive} />
             </div>
           </div>
 
@@ -650,9 +652,9 @@ export function ChatView(p: Props) {
   );
 }
 
-function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void }) {
+function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin, onArchive }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void; onArchive?: () => void }) {
   const actions = chatActions(chat, toast, msgs);
-  const groups = ["Continue", "More"] as const;
+  const groups = ["Continue", "Open", "Copy", "Save"] as const;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button size="sm" />}>
@@ -667,9 +669,14 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
           <DropdownMenuItem onClick={onTogglePin}>
             {pinned ? <PinOff className="size-4" strokeWidth={1.5} /> : <Pin className="size-4" strokeWidth={1.5} />} {pinned ? "Unpin" : "Pin to top"}
           </DropdownMenuItem>
+          {onArchive && (
+            <DropdownMenuItem onClick={onArchive}>
+              {chat.userArchived ? <ArchiveRestore className="size-4" strokeWidth={1.5} /> : <Archive className="size-4" strokeWidth={1.5} />} {chat.userArchived ? "Unarchive" : "Archive"}
+            </DropdownMenuItem>
+          )}
         </DropdownMenuGroup>
         {groups.map((g) => {
-          const items = actions.filter((a) => (g === "More" ? ["Open", "Copy", "Save"].includes(a.group) : a.group === g));
+          const items = actions.filter((a) => a.group === g);
           if (!items.length) return null;
           return (
             <div key={g}>

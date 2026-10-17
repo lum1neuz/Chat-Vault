@@ -84,6 +84,7 @@ export function OverviewPage({
   onSync,
   onSearch,
   actions,
+  indexing,
   userName,
 }: {
   overview: Record<Provider, Overview | null>;
@@ -94,12 +95,15 @@ export function OverviewPage({
   onSync: () => void;
   onSearch: () => void;
   actions?: ReactNode;
+  /** While ChatVault is scanning, the line under the greeting shows the progress instead. */
+  indexing?: { done: number; total: number } | null;
   userName?: string;
 }) {
   // A full-height window has room for five recent chats; a smaller one shows four so the page still fits.
-  const [shown, setShown] = useState(() => (window.innerHeight >= 1000 ? 5 : 4));
+  const rows = () => (window.innerHeight >= 1150 ? 6 : window.innerHeight >= 1000 ? 5 : 4);
+  const [shown, setShown] = useState(rows);
   useEffect(() => {
-    const on = () => setShown(window.innerHeight >= 1000 ? 5 : 4);
+    const on = () => setShown(rows());
     window.addEventListener("resize", on);
     return () => window.removeEventListener("resize", on);
   }, []);
@@ -111,10 +115,10 @@ export function OverviewPage({
     let stale = false;
     Promise.all(
       PROVIDERS.map((p) =>
-        invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q: "", offset: 0, limit: 5 }).then((r) => r.items),
+        invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q: "", offset: 0, limit: 6 }).then((r) => r.items),
       ),
     )
-      .then((all) => !stale && setRecent(all.flat().sort((x, y) => y.lastMs - x.lastMs).slice(0, 5)))
+      .then((all) => !stale && setRecent(all.flat().sort((x, y) => y.lastMs - x.lastMs).slice(0, 6)))
       .catch(() => !stale && setRecent([]));
     invoke<Backup>("backup_status").then((b) => !stale && setBackup(b)).catch(() => {});
     invoke<Stats>("overview_stats", { days: DAYS }).then((s) => !stale && setStats(s)).catch(() => {});
@@ -153,8 +157,8 @@ export function OverviewPage({
 
   return (
     <FadedScroll className="flex-1">
-      <div className="flex min-h-full items-center justify-center p-6">
-        <div className="w-full max-w-4xl space-y-4">
+      <div className="@container flex min-h-full items-start justify-center px-6 pb-10 pt-6 min-[1200px]:pt-10">
+        <div className="w-full max-w-4xl space-y-4 @min-[1080px]:max-w-5xl @min-[1400px]:max-w-[1160px]">
           <div className="flex items-center gap-3">
             <AppLogo className="size-10 shrink-0 rounded-xl ring-1 ring-border" />
             <div className="min-w-0 flex-1">
@@ -163,7 +167,11 @@ export function OverviewPage({
                 {userName ? `, ${userName}` : ""}
               </h2>
               <p className="text-sm text-muted-foreground">
-                {ready
+                {indexing
+                  ? indexing.total
+                    ? `Indexing ${indexing.done.toLocaleString()} of ${indexing.total.toLocaleString()} chats…`
+                    : "Scanning this computer for chats…"
+                  : ready
                   ? `${total.toLocaleString()} chats across ${accountCount} accounts${stats ? `, ${week.toLocaleString()} active this week` : ""}`
                   : "Looking for chats on this computer…"}
               </p>
@@ -203,9 +211,9 @@ export function OverviewPage({
               >
                 <div className="pt-4">
                   {stats === null ? (
-                    <Skeleton className="mx-4 mb-4 h-40" />
+                    <Skeleton className="mx-4 mb-4 h-40 @min-[1080px]:h-52" />
                   ) : (
-                    <ChartContainer config={chartConfig} className="h-40 w-full">
+                    <ChartContainer config={chartConfig} className="h-40 w-full @min-[1080px]:h-52">
                       <AreaChart data={chartData} margin={{ left: 0, right: 0, top: 8, bottom: 0 }}>
                         <defs>
                           {PROVIDERS.map((p) => (
