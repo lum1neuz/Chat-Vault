@@ -35,6 +35,13 @@ fn cli_root() -> Option<PathBuf> {
 /// Opens a database that Cursor may be using, without taking any lock on it.
 fn open_ro(path: &Path) -> Option<Connection> {
     let p = path.to_string_lossy().replace('\\', "/").replace(' ', "%20").replace('#', "%23");
+    // Cursor writes new messages to the database's write-ahead log first. Reading normally includes them;
+    // "immutable" would ignore the log and miss everything newer than the last checkpoint.
+    if let Ok(c) = Connection::open_with_flags(format!("file:{}?mode=ro", p), OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        if c.query_row("SELECT 1 FROM sqlite_master LIMIT 1", [], |r| r.get::<_, i64>(0)).is_ok() {
+            return Some(c);
+        }
+    }
     Connection::open_with_flags(format!("file:{}?mode=ro&immutable=1", p), OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
 }
 
@@ -244,7 +251,13 @@ pub fn scan() -> Vec<CursorChat> {
 
 /// A fingerprint of the Cursor files, so the index can skip a rescan when nothing changed.
 pub fn fingerprint() -> i64 {
-    let a = global_db().map(|p| mtime_ms(&p)).unwrap_or(0);
+    let a = global_db()
+        .map(|p| {
+            let mut wal = p.clone().into_os_string();
+            wal.push("-wal");
+            mtime_ms(&p).max(mtime_ms(Path::new(&wal)))
+        })
+        .unwrap_or(0);
     let b = cli_stores().iter().map(|p| mtime_ms(p)).max().unwrap_or(0);
     a.max(b)
 }

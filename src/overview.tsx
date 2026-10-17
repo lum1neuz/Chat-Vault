@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Area, AreaChart, CartesianGrid, XAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { FadedScroll } from "@/faded-scroll";
-import { ArrowUpRight, TrendingUp, FolderOpen, DatabaseBackup, HardDrive, MessagesSquare, ShieldCheck } from "lucide-react";
+import { ArrowUpRight, DatabaseBackup, HardDrive, MessagesSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AppLogo, ProviderLogo } from "@/claude-logo";
 import { PROVIDERS, fmtSize, type Chat, type Provider } from "@/chat-actions";
@@ -96,6 +96,13 @@ export function OverviewPage({
   actions?: ReactNode;
   userName?: string;
 }) {
+  // A full-height window has room for five recent chats; a smaller one shows four so the page still fits.
+  const [shown, setShown] = useState(() => (window.innerHeight >= 1000 ? 5 : 4));
+  useEffect(() => {
+    const on = () => setShown(window.innerHeight >= 1000 ? 5 : 4);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
   const [recent, setRecent] = useState<Chat[] | null>(null);
   const [backup, setBackup] = useState<Backup | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -176,8 +183,6 @@ export function OverviewPage({
             ))}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-5">
-            <div className="space-y-4 lg:col-span-3">
               <Card
                 className="overflow-hidden"
                 title="Activity"
@@ -222,6 +227,8 @@ export function OverviewPage({
                 </div>
               </Card>
 
+          <div className="grid gap-4 lg:grid-cols-5">
+            <div className="space-y-4 lg:col-span-3">
               <Card
                 title="Pick up where you left off"
                 action={
@@ -232,7 +239,7 @@ export function OverviewPage({
               >
                 <div className="p-2 pt-1">
                   {recent === null ? (
-                    Array.from({ length: 4 }).map((_, i) => <ChatRowSkeleton key={i} i={i} />)
+                    Array.from({ length: shown }).map((_, i) => <ChatRowSkeleton key={i} i={i} />)
                   ) : recent.length === 0 ? (
                     <div className="flex flex-col items-center gap-2 p-8 text-center">
                       <MessagesSquare className="size-8 text-muted-foreground" strokeWidth={1.25} />
@@ -240,7 +247,7 @@ export function OverviewPage({
                       <p className="text-xs text-muted-foreground">Chats appear here once Claude Code or Codex has been used.</p>
                     </div>
                   ) : (
-                    recent.map((c) => (
+                    recent.slice(0, shown).map((c) => (
                       <button key={`${c.provider}:${c.id}`} onClick={() => onOpenChat(c)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-muted">
                         <IconBox>
                           <ProviderLogo provider={c.provider} className="size-5" />
@@ -259,60 +266,58 @@ export function OverviewPage({
             </div>
 
             <div className="space-y-4 lg:col-span-2">
-              <Card icon={<TrendingUp className="size-4 text-muted-foreground" strokeWidth={1.5} />} title="Busiest projects" hint={stats ? `Your ${Math.min(5, stats.projects.length)} most-used folders` : undefined}>
-                <ol className="space-y-0.5 p-2 pt-2">
-                  {stats === null
-                    ? Array.from({ length: 5 }).map((_, i) => (
-                        <li key={i} className="flex items-center gap-3 px-2 py-2">
-                          <Skeleton className="size-6 rounded-md" />
-                          <Skeleton className="h-4 w-3/4" />
-                        </li>
-                      ))
-                    : stats.projects.slice(0, 5).map((p, i) => (
-                        <li key={p.name} className="flex items-center gap-3 rounded-lg px-2 py-2 transition hover:bg-muted/60">
-                          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium text-muted-foreground">{i + 1}</span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-                                <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />
-                                <span className="truncate">{p.name}</span>
-                              </span>
-                              <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{p.count.toLocaleString()}</span>
-                            </div>
+              <Card icon={<HardDrive className="size-4 text-muted-foreground" strokeWidth={1.5} />} title="Storage by tool" hint="Where the space on this PC goes">
+                <div className="space-y-3 p-4 pt-3">
+                  {stats === null ? (
+                    <Skeleton className="h-16 w-full" />
+                  ) : (
+                    (() => {
+                      const rows = [
+                        { name: "Claude", size: stats.sizeClaude, color: CLAUDE },
+                        { name: "Codex", size: stats.sizeCodex, color: CODEX },
+                        { name: "Cursor", size: stats.sizeCursor ?? 0, color: CURSOR },
+                      ];
+                      const total = rows.reduce((a, r) => a + r.size, 0) || 1;
+                      return (
+                        <>
+                          <div className="flex h-2 overflow-hidden rounded-full bg-muted">
+                            {rows.map((r) => (
+                              <div key={r.name} style={{ width: `${(r.size / total) * 100}%`, background: r.color }} />
+                            ))}
                           </div>
-                        </li>
-                      ))}
-                </ol>
+                          <ul className="space-y-1.5">
+                            {rows.map((r) => (
+                              <li key={r.name} className="flex items-center justify-between text-sm">
+                                <span className="flex items-center gap-2">
+                                  <span className="size-2 rounded-full" style={{ background: r.color }} /> {r.name}
+                                </span>
+                                <span className="text-xs tabular-nums text-muted-foreground">{fmtSize(r.size)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      );
+                    })()
+                  )}
+                </div>
               </Card>
 
               <Card>
-                <div className="space-y-3 p-4">
-                  <div className="flex items-start gap-3">
-                    <IconBox>
-                      <DatabaseBackup className="size-4 text-muted-foreground" strokeWidth={1.5} />
-                    </IconBox>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium">{backup?.lastSyncMs ? `Synced ${when(backup.lastSyncMs)}` : "Not backed up yet"}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {backup && backup.files > 0 ? `${backup.files.toLocaleString()} files · ${fmtSize(backup.bytes)} in Documents` : "Copy all chats to your Documents folder."}
-                      </p>
-                    </div>
+                <div className="flex items-start gap-3 p-4">
+                  <IconBox>
+                    <DatabaseBackup className="size-4 text-muted-foreground" strokeWidth={1.5} />
+                  </IconBox>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{backup?.lastSyncMs ? `Synced ${when(backup.lastSyncMs)}` : "Not backed up yet"}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {backup && backup.files > 0 ? `${backup.files.toLocaleString()} files · ${fmtSize(backup.bytes)} in Documents` : "Copy chats to Documents."}
+                    </p>
                   </div>
-                  <Button size="sm" variant="outline" className="w-full" onClick={onSync}>
+                  <Button size="sm" variant="outline" className="shrink-0 self-center" onClick={onSync}>
                     Sync &amp; backup
                   </Button>
                 </div>
               </Card>
-
-              <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
-                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15">
-                  <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-400" strokeWidth={1.75} />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">Your chats stay on your desktop</p>
-                  <p className="text-xs text-muted-foreground">Private to you. Nothing is uploaded.</p>
-                </div>
-              </div>
             </div>
           </div>
         </div>

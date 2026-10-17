@@ -29,64 +29,72 @@ export function SidebarSkeleton({ rows = 8 }: { rows?: number }) {
   );
 }
 
-function BubbleSkeleton({ right, lines }: { right?: boolean; lines: number }) {
+/** One message: avatar, name and time, then the text. Your own messages sit on the right. */
+function MessageSkeleton({ right, lines }: { right?: boolean; lines: number }) {
   return (
-    <div className={`flex ${right ? "justify-end" : ""}`}>
-      <div className={`space-y-2 rounded-xl border px-3.5 py-3 ${right ? "w-[55%]" : "w-[78%]"}`}>
-        <div className="flex items-center gap-2">
-          <Skeleton className="h-3 w-10" />
-          <Skeleton className="h-3 w-12" />
+    <div className={`flex items-start gap-3 ${right ? "flex-row-reverse" : ""}`}>
+      <Skeleton className="size-8 shrink-0 rounded-full" />
+      <div className={`min-w-0 space-y-2 ${right ? "flex w-[55%] flex-col items-end" : "flex-1"}`}>
+        <div className={`flex items-center gap-2 ${right ? "flex-row-reverse" : ""}`}>
+          <Skeleton className="h-3.5 w-12" />
+          <Skeleton className="h-3 w-14" />
         </div>
         {Array.from({ length: lines }).map((_, i) => (
-          <Skeleton key={i} className={`h-3.5 ${i === lines - 1 ? "w-2/5" : i % 2 ? "w-11/12" : "w-full"}`} />
+          <Skeleton key={i} className={`h-3.5 ${right ? (i === lines - 1 && lines > 1 ? "w-1/2" : "w-full") : i === lines - 1 ? "w-2/5" : i % 2 ? "w-11/12" : "w-full"}`} />
         ))}
       </div>
     </div>
   );
 }
 
-/** Messages while a chat is loading. */
-export function MessagesSkeleton() {
+/** A collapsed run of steps, like the Trace line. */
+function StepsSkeleton() {
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-4" aria-busy="true">
-      <BubbleSkeleton right lines={2} />
-      <BubbleSkeleton lines={5} />
-      <div className="flex items-center gap-2 pl-2">
-        <Skeleton className="size-3" />
-        <Skeleton className="h-3 w-56" />
-      </div>
-      <BubbleSkeleton right lines={3} />
-      <BubbleSkeleton lines={4} />
-      <BubbleSkeleton right lines={1} />
+    <div className="flex items-center gap-2 pl-11">
+      <Skeleton className="size-4 rounded" />
+      <Skeleton className="h-3.5 w-16" />
+      <Skeleton className="h-3.5 w-44" />
     </div>
   );
 }
 
-/** The chat header while a chat is loading. */
+/** Messages while a chat is loading. Same width and spacing as the real conversation. */
+export function MessagesSkeleton() {
+  return (
+    <div className="mx-auto max-w-3xl space-y-7 px-4 pb-24 pt-4" aria-busy="true">
+      <MessageSkeleton right lines={2} />
+      <StepsSkeleton />
+      <MessageSkeleton lines={5} />
+      <MessageSkeleton right lines={3} />
+      <StepsSkeleton />
+      <MessageSkeleton lines={4} />
+    </div>
+  );
+}
+
+/** The chat header while a chat is loading: logo box, title with badges, toggles and Actions. */
 export function HeaderSkeleton() {
   return (
     <div className="border-b py-3" aria-busy="true">
-      <div className="w-full space-y-3 px-4">
-      <div className="flex items-center gap-3">
-        <Skeleton className="size-9 rounded-lg" />
-        <Skeleton className="h-5 w-64" />
-        <div className="ml-auto flex gap-2">
-          <Skeleton className="size-8" />
-          <Skeleton className="size-8" />
-          <Skeleton className="size-8" />
+      <div className="w-full px-4">
+        <div className="flex items-center gap-3">
+          <Skeleton className="size-10 shrink-0 rounded-xl" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <Skeleton className="h-4 w-64 max-w-full" />
+            <div className="flex flex-wrap gap-1">
+              <Skeleton className="h-5 w-24 rounded-md" />
+              <Skeleton className="h-5 w-28 rounded-md" />
+              <Skeleton className="h-5 w-16 rounded-md" />
+              <Skeleton className="h-5 w-24 rounded-md" />
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <Skeleton className="size-8 rounded-lg" />
+            <Skeleton className="size-8 rounded-lg" />
+            <Skeleton className="size-8 rounded-lg" />
+          </div>
+          <Skeleton className="h-8 w-24 shrink-0 rounded-lg" />
         </div>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Skeleton className="h-8 w-40" />
-        <Skeleton className="h-8 w-36" />
-        <Skeleton className="h-8 w-24" />
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        <Skeleton className="h-5 w-24 rounded-full" />
-        <Skeleton className="h-5 w-40 rounded-full" />
-        <Skeleton className="h-5 w-28 rounded-full" />
-        <Skeleton className="h-4 w-52" />
-      </div>
       </div>
     </div>
   );

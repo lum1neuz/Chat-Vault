@@ -35,7 +35,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Toaster } from "@/components/ui/sonner";
+import { AppToaster, notify } from "@/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { AppLogo, ProviderLogo } from "@/claude-logo";
@@ -57,13 +57,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { SidebarSkeleton } from "@/skeletons";
+import { Splash } from "@/splash";
+import { TitleBar } from "@/titlebar";
 import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
 import { chatKey, useChatMeta, usePersisted } from "@/store";
 import { startAutoUpdate } from "@/updater";
-import { toast as sonner } from "sonner";
 
 const PAGE_SIZE = 20;
-const MSG_PAGE = 400;
+const MSG_PAGE = 80;
 
 type Overview = { total: number; accounts: { id: string; count: number }[]; latestMs: number | null };
 type Hit = { id: string; snippet: string };
@@ -94,6 +95,9 @@ export default function App() {
   const [pinned, setPinned] = useState<Chat[]>([]);
   const [total, setTotal] = useState(0);
   const [loadingList, setLoadingList] = useState(true);
+  // The start screen stays for at least a moment, then fades once the first list is in.
+  const [splash, setSplash] = useState<"on" | "leaving" | "off">("on");
+  const bootAt = useRef(Date.now());
   const [error, setError] = useState<string | null>(null);
   const [hits, setHits] = useState<Record<string, string> | null>(null);
   const [searching, setSearching] = useState(false);
@@ -106,9 +110,12 @@ export default function App() {
   const [renaming, setRenaming] = useState<Chat | null>(null);
   const [deleting, setDeleting] = useState<Chat | null>(null);
   const [organize, setOrganize] = usePersisted("chatvault.organize", "list");
-  const [closedProjects, setClosedProjects] = usePersisted<string[]>("chatvault.closedProjects", []);
+  // Expand/collapse-all sets a mode; single clicks are exceptions to it, so projects that load later follow the mode too.
+  const [projectsMode, setProjectsMode] = usePersisted<"open" | "closed">("chatvault.projectsMode", "open");
+  const [projectExceptions, setProjectExceptions] = usePersisted<string[]>("chatvault.projectExceptions", []);
+  const projectOpen = useCallback((n: string) => (projectsMode === "open") !== projectExceptions.includes(n), [projectsMode, projectExceptions]);
 
-  const say = useCallback((m: string) => sonner(m), []);
+  const say = useCallback((m: string) => void notify(m), []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -202,6 +209,15 @@ export default function App() {
     };
   }, [provider, account, q, sort, scope, reloadKey]);
 
+  useEffect(() => {
+    if (splash !== "on" || (isTauri && (loadingList || indexing))) return;
+    const t = window.setTimeout(() => {
+      setSplash("leaving");
+      window.setTimeout(() => setSplash("off"), 320);
+    }, Math.max(0, 900 - (Date.now() - bootAt.current)));
+    return () => window.clearTimeout(t);
+  }, [splash, loadingList, indexing]);
+
   const loadingMore = useRef(false);
   const loadMore = useCallback(async () => {
     if (loadingMore.current || hits) return;
@@ -252,30 +268,260 @@ export default function App() {
     }
   };
 
+  const openId = useRef(0);
+  const [outline, setOutline] = useState<{ ts: string; text: string }[] | null>(null);
   const open = useCallback(
     (chat: Chat) => {
+      const id = ++openId.current;
       setSelected(chat);
       setPage(null);
+      setOutline(null);
+      // A light outline of the whole chat for the timeline, built in the background; only a few short lines come back.
+      invoke<{ ts: string; text: string }[]>("chat_outline", { provider: chat.provider, path: chat.path })
+        .then((o) => {
+          if (openId.current === id) setOutline(o);
+        })
+        .catch(() => {});
+      // The newest messages come first, read from the end of the file, so the chat is readable at once.
+      invoke<Msg[]>("read_chat_tail", { provider: chat.provider, path: chat.path, limit: MSG_PAGE })
+        .then((messages) => {
+          if (openId.current === id) setPage((cur) => cur ?? { messages, total: messages.length, start: 0, partial: true });
+        })
+        .catch(() => {});
+      // The real total follows; earlier messages are only read as you scroll up toward them.
       invoke<MsgPage>("read_chat_page", { provider: chat.provider, path: chat.path, before: null, limit: MSG_PAGE })
-        .then(setPage)
+        .then((r) => {
+          if (openId.current === id) setPage(r);
+        })
         .catch((e) => {
-          setPage({ messages: [], total: 0, start: 0 });
+          if (openId.current !== id) return;
+          setPage((cur) => (cur ? { ...cur, partial: false } : { messages: [], total: 0, start: 0 }));
           say(String(e));
         });
     },
     [say],
   );
 
+  // Keep the open chat live: when its file grows, only the new messages are read and added at the bottom.
+  // A fork is a new file next to the original: index it, name it, and open it, all without a terminal.
+  useEffect(() => {
+    const onFork = async (e: Event) => {
+      const d = (e as CustomEvent<{ from: Chat; id: string; path: string }>).detail;
+      try {
+        await invoke("refresh_index");
+        setReloadKey((k) => k + 1);
+        const r = await invoke<{ items: Chat[] }>("query_chats", { provider: d.from.provider, account: "all", q: "", offset: 0, limit: 40, sort: "recent", scope: "all" });
+        const made = r.items.find((c) => c.id === d.id);
+        if (made) {
+          rename(chatKey(made), `${names[chatKey(d.from)] || d.from.title} (fork)`);
+          setProvider(made.provider);
+          open(made);
+        }
+      } catch (err) {
+        say(String(err));
+      }
+    };
+    window.addEventListener("chatvault:forked", onFork);
+    return () => window.removeEventListener("chatvault:forked", onFork);
+  }, [rename, names, open, say]);
+
+  // Chats an agent is writing to right now (their file changed in the last 20 seconds) get a green dot in the list.
+  const [liveKeys, setLiveKeys] = useState<Set<string>>(new Set());
+  const listed = useRef<Chat[]>([]);
+  listed.current = [...pinned, ...items];
+  useEffect(() => {
+    let busy = false;
+    const tick = async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const seen = new Map<string, Chat>();
+        listed.current.forEach((c) => c.provider !== "cursor" && seen.set(chatKey(c), c));
+        const chats = [...seen.values()];
+        const ms = await invoke<number[]>("chat_stamps", { items: chats.map((c) => [c.provider, c.path]) });
+        const now = Date.now();
+        const next = new Set<string>();
+        chats.forEach((c, i) => ms[i] && now - ms[i] < 20000 && next.add(chatKey(c)));
+        setLiveKeys((cur) => (cur.size === next.size && [...next].every((k) => cur.has(k)) ? cur : next));
+      } catch {
+        /* try again next time */
+      } finally {
+        busy = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, 3000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Every tool: new conversations and new messages show up on their own. A new file is picked up at once;
+  // changes inside existing chats are folded in at most every 15 seconds.
+  // Refreshes the list in place: keeps as many rows as are already shown, so the sidebar does not jump back to the top.
+  const listArgs = useRef({ provider, account, q, sort, scope, count: 0 });
+  listArgs.current = { provider, account, q, sort, scope, count: items.length };
+  const quietReload = useCallback(async () => {
+    const l = listArgs.current;
+    const r = await invoke<{ items: Chat[]; total: number }>("query_chats", { provider: l.provider, account: l.account, q: l.q, offset: 0, limit: Math.min(300, Math.max(PAGE_SIZE, l.count)), sort: l.sort, scope: l.scope });
+    setItems(r.items);
+    setTotal(r.total);
+  }, []);
+  const cursorFp = useRef(0);
+  const cursorChanged = useRef(0);
+  const filesFp = useRef<[number, number] | null>(null);
+  const lastRefresh = useRef(0);
+  useEffect(() => {
+    if (!isTauri) return;
+    let busy = false;
+    const id = window.setInterval(async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const [fp, ff] = await Promise.all([invoke<number>("cursor_fingerprint"), invoke<[number, number]>("files_fingerprint")]);
+        const cursorMoved = cursorFp.current !== 0 && fp !== cursorFp.current;
+        const prev = filesFp.current;
+        const fresh = !!prev && ff[0] !== prev[0];
+        const grew = !!prev && ff[1] !== prev[1] && Date.now() - lastRefresh.current > 15000;
+        cursorFp.current = fp;
+        filesFp.current = ff;
+        if (cursorMoved) cursorChanged.current = Date.now();
+        if (cursorMoved || fresh || grew) {
+          lastRefresh.current = Date.now();
+          await invoke("refresh_index");
+          await quietReload();
+          const sel = selRef.current;
+          const cur = pageRef.current;
+          if (cursorMoved && sel?.provider === "cursor" && cur && !cur.partial) {
+            const r = await invoke<MsgPage>("read_chat_page", { provider: "cursor", path: sel.path, before: null, limit: 2000 });
+            if (selRef.current?.id === sel.id && r.total !== cur.total) setPage(r);
+          }
+        }
+        if (selRef.current?.provider === "cursor") setLive(Date.now() - cursorChanged.current < 20000);
+      } catch {
+        /* try again next time */
+      } finally {
+        busy = false;
+      }
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [quietReload]);
+
+  const stamp = useRef("");
+  const [live, setLive] = useState(false);
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const selRef = useRef(selected);
+  selRef.current = selected;
+  useEffect(() => {
+    stamp.current = "";
+    setLive(false);
+    const sel = selected;
+    if (!sel || sel.provider === "cursor") return;
+    let busy = false;
+    const id = window.setInterval(async () => {
+      const cur = pageRef.current;
+      if (busy || !cur || cur.partial || selRef.current?.id !== sel.id) return;
+      busy = true;
+      try {
+        const [size, ms] = await invoke<[number, number]>("chat_stamp", { provider: sel.provider, path: sel.path });
+        // Working = the file changed a moment ago, or your message / a tool call is still waiting for the agent to continue.
+        const last = cur.messages[cur.messages.length - 1];
+        const waiting = !!last && (last.role === "user" || last.kind === "tool");
+        const age = Date.now() - ms;
+        setLive(age < 20000 || (waiting && age < 120000));
+        const st = `${size}:${ms}`;
+        if (!stamp.current) {
+          stamp.current = st;
+          return;
+        }
+        if (st === stamp.current) return;
+        stamp.current = st;
+        // Fast path: only the end of the file is read, and what is new is whatever follows the last message already shown.
+        const sig = (m: Msg) => `${m.ts}|${m.role}|${m.kind}|${m.text.slice(0, 80)}`;
+        const lastShown = cur.messages[cur.messages.length - 1];
+        if (lastShown && sel.provider !== "cursor") {
+          try {
+            const tail = await invoke<Msg[]>("read_chat_tail", { provider: sel.provider, path: sel.path, limit: 60 });
+            const at = tail.map(sig).lastIndexOf(sig(lastShown));
+            if (at >= 0) {
+              const add = tail.slice(at + 1);
+              if (selRef.current?.id !== sel.id) return;
+              if (add.length) setPage((p) => (p && p.total === cur.total ? { ...p, messages: [...p.messages, ...add], total: p.total + add.length } : p));
+              return;
+            }
+          } catch {
+            /* fall back to the full read below */
+          }
+        }
+        let r = await invoke<MsgPage>("read_chat_page", { provider: sel.provider, path: sel.path, before: null, limit: 50 });
+        const diff = r.total - cur.total;
+        if (diff > 50) r = await invoke<MsgPage>("read_chat_page", { provider: sel.provider, path: sel.path, before: null, limit: Math.min(diff, 2000) });
+        if (selRef.current?.id !== sel.id) return;
+        if (diff <= 0) {
+          if (diff < 0) setPage(r);
+          return;
+        }
+        const add = r.messages.slice(-diff);
+        setPage((p) => (p && p.total === cur.total ? { ...p, messages: [...p.messages, ...add], total: r.total } : p));
+      } catch {
+        /* the file may be mid-write; try again next time */
+      } finally {
+        busy = false;
+      }
+    }, 600);
+    return () => window.clearInterval(id);
+  }, [selected?.id, selected?.provider, selected?.path]);
+
   const loadEarlier = async () => {
     if (!selected || !page || page.start === 0) return;
     setLoadingEarlier(true);
     try {
-      const r = await invoke<MsgPage>("read_chat_page", { provider: selected.provider, path: selected.path, before: page.start, limit: MSG_PAGE });
+      const r = await invoke<MsgPage>("read_chat_page", { provider: selected.provider, path: selected.path, before: page.start, limit: 200 });
       setPage({ messages: [...r.messages, ...page.messages], total: r.total, start: r.start });
     } catch (e) {
       say(String(e));
     } finally {
       setLoadingEarlier(false);
+    }
+  };
+  /** Reads earlier messages until the one sent at `ts` is loaded, so a tick far up the timeline can be opened. */
+  const untilBusy = useRef(false);
+  const untilWant = useRef<string | null>(null);
+  const loadUntil = async (ts: string) => {
+    // One quiet load at a time; if you hover a tick further up meanwhile, it carries on to that one.
+    if (untilBusy.current) {
+      if (!untilWant.current || Date.parse(ts) < Date.parse(untilWant.current)) untilWant.current = ts;
+      return;
+    }
+    const sel = selRef.current;
+    if (!sel || !pageRef.current) return;
+    untilBusy.current = true;
+    let target = Date.parse(ts);
+    try {
+      for (;;) {
+        const first = pageRef.current;
+        if (!first) break;
+        let cur: MsgPage = first;
+        while (cur.start > 0) {
+          const oldest = cur.messages.find((m) => m.ts)?.ts;
+          if (oldest && Date.parse(oldest) <= target) break;
+          const r = await invoke<MsgPage>("read_chat_page", { provider: sel.provider, path: sel.path, before: cur.start, limit: 400 });
+          if (selRef.current?.id !== sel.id) return;
+          cur = { messages: [...r.messages, ...cur.messages], total: r.total, start: r.start };
+          pageRef.current = cur;
+          setPage(cur);
+        }
+        if (untilWant.current && Date.parse(untilWant.current) < target) {
+          target = Date.parse(untilWant.current);
+          untilWant.current = null;
+          continue;
+        }
+        break;
+      }
+    } catch (e) {
+      say(String(e));
+    } finally {
+      untilBusy.current = false;
+      untilWant.current = null;
     }
   };
   const loadAll = async () => {
@@ -314,7 +560,7 @@ export default function App() {
   const pinnedShown = pinned.filter((c) => !lq || named(c).title.toLowerCase().includes(lq) || c.project.toLowerCase().includes(lq));
   const recent = items.filter((c) => !pinSet.has(chatKey(c)));
   const projectNames = useMemo(() => groupByProject(recent).map(([name]) => name), [recent]);
-  const allProjectsClosed = projectNames.length > 0 && projectNames.every((n) => closedProjects.includes(n));
+  const allProjectsClosed = projectNames.length > 0 && projectNames.every((n) => !projectOpen(n));
   const msgs: Msg[] | null = page?.messages ?? null;
 
   const extras = (c: Chat): ChatAction[] => orderChat(([
@@ -345,6 +591,7 @@ export default function App() {
       chat={named(c)}
       selected={selected?.id === c.id && selected.provider === c.provider}
       pinned={pinSet.has(chatKey(c))}
+      live={liveKeys.has(chatKey(c))}
       hit={hits?.[c.id]}
       msgs={selected?.id === c.id ? msgs : null}
       extras={extras(c)}
@@ -367,26 +614,17 @@ export default function App() {
                 <DatabaseBackup className="size-4" /> Sync &amp; backup
               </Button>
             </Tip>
-            <Tip label="Scan this PC for new chats.">
-              <Button variant="ghost" size="icon" onClick={rescan} aria-label="Refresh" disabled={!!indexing}>
-                <RefreshCw className={cn("size-4", indexing && "animate-spin")} />
-              </Button>
-            </Tip>
-            <Tip label={dark ? "Switch to light theme" : "Switch to dark theme"}>
-              <Button variant="ghost" size="icon" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
-                {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-              </Button>
-            </Tip>
     </>
   );
 
   return (
     <TooltipProvider delay={200}>
-      <div className="flex h-screen bg-background text-foreground">
+      <div className="flex h-screen overflow-hidden bg-background text-foreground">
+      {splash !== "off" && <Splash leaving={splash === "leaving"} />}
         {/* Sidebar */}
         <aside className={cn("flex shrink-0 flex-col overflow-hidden border-r transition-[width] duration-300 ease-in-out", sidebarOpen ? "w-[320px]" : "w-0 border-r-0")}>
           {sidebarOpen ? (
-            <div className="flex h-14 shrink-0 items-center gap-1 px-3">
+            <div data-tauri-drag-region className="flex h-14 shrink-0 items-center gap-1 pl-3 pr-14">
               <button
                 onClick={() => setSelected(null)}
                 className="flex min-w-0 flex-1 cursor-default items-center gap-2.5 p-1 text-left outline-none"
@@ -401,11 +639,6 @@ export default function App() {
                   )}
                 </div>
               </button>
-              <Tip label="Hide the sidebar">
-                <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" aria-label="Hide the sidebar" onClick={() => setSidebarOpen(false)}>
-                  <PanelLeft className="size-4" />
-                </Button>
-              </Tip>
             </div>
           ) : null}
           <div className={cn("flex min-h-0 w-[320px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
@@ -477,7 +710,10 @@ export default function App() {
                           size="icon"
                           aria-label={allProjectsClosed ? "Expand all projects" : "Collapse all projects"}
                           className="size-7 shrink-0 text-muted-foreground"
-                          onClick={() => setClosedProjects(allProjectsClosed ? [] : projectNames)}
+                          onClick={() => {
+                            setProjectsMode(allProjectsClosed ? "open" : "closed");
+                            setProjectExceptions([]);
+                          }}
                         >
                           {allProjectsClosed ? <ChevronsUpDown className="size-4" /> : <ChevronsDownUp className="size-4" />}
                         </Button>
@@ -510,12 +746,12 @@ export default function App() {
                 )}
                 {organize === "project"
                   ? groupByProject(recent).map(([project, list]) => {
-                      const isOpen = !closedProjects.includes(project);
+                      const isOpen = projectOpen(project);
                       return (
                         <Collapsible
                           key={project}
                           open={isOpen}
-                          onOpenChange={(o) => setClosedProjects((c) => (o ? c.filter((x) => x !== project) : [...c, project]))}
+                          onOpenChange={(o) => setProjectExceptions((c) => (o === (projectsMode === "open") ? c.filter((x) => x !== project) : c.includes(project) ? c : [...c, project]))}
                           className="pt-1"
                         >
                           <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground">
@@ -541,14 +777,9 @@ export default function App() {
         </aside>
 
         {/* Content */}
-        <main className="flex min-w-0 flex-1 flex-col">
-          {selected && (
-            <div className={cn("flex h-14 shrink-0 items-center gap-2 border-b px-4", !sidebarOpen && "pl-14")}>
-              <p className="min-w-0 flex-1 truncate text-sm font-medium">{`${PROVIDER_NAME[selected.provider]} / ${selected.project}`}</p>
-              {controls}
-            </div>
-          )}
-
+        <div className="flex min-w-0 flex-1 flex-col">
+        <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${selected.project}` : undefined} actions={selected ? controls : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {!selected ? (
             <OverviewPage
               actions={controls}
@@ -569,6 +800,9 @@ export default function App() {
               chat={named(selected)}
               page={page}
               loadingEarlier={loadingEarlier}
+              live={live}
+              outline={outline}
+              onLoadUntil={loadUntil}
               onLoadEarlier={loadEarlier}
               onLoadAll={loadAll}
               showSteps={showSteps}
@@ -583,6 +817,7 @@ export default function App() {
             />
           )}
         </main>
+        </div>
 
         <CommandPalette
           open={paletteOpen}
@@ -603,15 +838,13 @@ export default function App() {
             { id: "theme", label: dark ? "Switch to the light theme" : "Switch to the dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
           ]}
         />
-        {!sidebarOpen && (
-          <div className="fixed left-3 top-3 z-40">
-            <Tip label="Show the sidebar">
-              <Button variant="outline" size="icon" aria-label="Show the sidebar" onClick={() => setSidebarOpen(true)}>
-                <PanelLeft className="size-4" />
-              </Button>
-            </Tip>
-          </div>
-        )}
+        <div className={cn("fixed top-3 z-30 transition-[left] duration-300 ease-in-out", sidebarOpen ? "left-[272px]" : "left-3", splash !== "off" && "hidden")}>
+          <Tip label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}>
+            <Button variant="ghost" size="icon" className="text-muted-foreground" aria-label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"} onClick={() => setSidebarOpen((o) => !o)}>
+              <PanelLeft className="size-4" />
+            </Button>
+          </Tip>
+        </div>
         <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />
         <DeleteDialog
           chat={deleting}
@@ -633,7 +866,7 @@ export default function App() {
             setRenaming(null);
           }}
         />
-        <Toaster key={String(dark)} position="bottom-right" />
+        <AppToaster />
       </div>
     </TooltipProvider>
   );
@@ -740,6 +973,7 @@ const ChatRow = memo(function ChatRow({
   chat,
   selected,
   pinned,
+  live,
   hit,
   msgs,
   extras,
@@ -749,6 +983,7 @@ const ChatRow = memo(function ChatRow({
   chat: Chat;
   selected: boolean;
   pinned: boolean;
+  live?: boolean;
   hit?: string;
   msgs: Msg[] | null;
   extras: ChatAction[];
@@ -764,8 +999,14 @@ const ChatRow = memo(function ChatRow({
       className={cn("group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted/50 dark:hover:bg-white/5", selected && "border-border bg-muted hover:bg-muted dark:border-white/15 dark:bg-white/10 dark:hover:bg-white/10")}
     >
       <div className="flex items-start gap-2.5">
-        <div className={cn("mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-white dark:group-hover:bg-white/10", selected && "bg-white dark:bg-white/10")}>
+        <div className={cn("relative mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-white dark:group-hover:bg-white/10", selected && "bg-white dark:bg-white/10")}>
           <ProviderLogo provider={chat.provider} className="size-5" />
+          {live && (
+            <span className="absolute -right-1 -top-1 flex size-2" aria-label="An agent is working in this chat">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex size-2 rounded-full bg-emerald-500 ring-[1.5px] ring-background" />
+            </span>
+          )}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -827,7 +1068,7 @@ function DeleteDialog({ chat, onClose, onConfirm }: { chat: Chat | null; onClose
               try {
                 await onConfirm(chat);
               } catch (err) {
-                sonner(String(err));
+                notify(String(err));
               } finally {
                 setBusy(false);
               }
@@ -894,13 +1135,13 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
       window.removeEventListener("resize", close);
     };
   }, [open]);
-  const groups = ["Chat", "Continue", "Open", "Copy"] as const;
+  const groups = ["Chat", "Continue", "More"] as const;
+  const inGroup = (a: ChatAction, g: string) => (g === "More" ? ["Open", "Copy", "Save"].includes(a.group) : a.group === g);
   const renderItem = (a: ChatAction) => {
     const Icon = a.icon;
     return (
       <button
         key={a.id}
-        title={a.hint}
         disabled={busyId !== null}
         className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && "text-destructive hover:bg-destructive/10")}
         onClick={async () => {
@@ -938,9 +1179,9 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
       >
         <MoreHorizontal className="size-4" />
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-64 gap-0 p-1" onClick={(e) => e.stopPropagation()}>
+      <PopoverContent side="right" align="start" sideOffset={8} className="w-64 gap-0 p-1" onClick={(e) => e.stopPropagation()}>
         {groups.map((g, gi) => {
-          const items = actions.filter((a) => a.group === g && !a.danger);
+          const items = actions.filter((a) => inGroup(a, g) && !a.danger);
           if (!items.length) return null;
           return (
             <div key={g}>

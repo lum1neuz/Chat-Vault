@@ -42,10 +42,11 @@ export type Msg = {
   kind: "text" | "tool" | "summary" | "image" | "result" | "reasoning";
   id?: string;
   name?: string;
-  data?: Record<string, unknown>;
+  data?: Record<string, unknown> | string;
   error?: boolean;
 };
-export type MsgPage = { messages: Msg[]; total: number; start: number };
+/** `partial` marks the quick first view of a chat's newest messages, before the full page and total are known. */
+export type MsgPage = { messages: Msg[]; total: number; start: number; partial?: boolean };
 
 export type AccountInfo = {
   id: string;
@@ -241,13 +242,14 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
     continueCodex,
     {
       id: "fork",
-      label: isClaude ? "Continue in Claude (copy)" : "Continue in Codex (copy)",
-      hint: "Resumes as a new copy, so the original chat file is left untouched.",
+      label: "Fork chat",
+      hint: "Makes a copy of this chat that appears in the list right away. The original is left untouched.",
       icon: GitFork,
       group: "Continue",
       run: async () => {
-        await launch(isClaude ? "claude-fork" : "codex-fork");
-        toast(`Starting a copy in ${isClaude ? "Claude Code" : "Codex"}`);
+        const f = await invoke<{ id: string; path: string }>("fork_chat", { provider: chat.provider, path: chat.path });
+        window.dispatchEvent(new CustomEvent("chatvault:forked", { detail: { from: chat, id: f.id, path: f.path } }));
+        toast("Forked. The copy is in your list.");
       },
     },
   ];

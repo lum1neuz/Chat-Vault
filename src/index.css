@@ -127,6 +127,12 @@
   html {
     @apply font-sans;
     }
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+    }
 }
 @layer base {
   button:not(:disabled),

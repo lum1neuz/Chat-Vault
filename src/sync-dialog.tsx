@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DatabaseBackup, FolderOpen, Loader2, RotateCcw, UploadCloud } from "lucide-react";
+import { DatabaseBackup, FolderOpen, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
@@ -69,7 +69,7 @@ export function SyncDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="max-h-[90dvh] overflow-y-auto overflow-x-hidden sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-start gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
@@ -82,14 +82,14 @@ export function SyncDialog({
           </div>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           <div className="rounded-lg border bg-muted/40 p-3 text-sm">
             <Row
               label="Backup folder"
               value={
                 <span className="inline-flex items-start gap-1">
                   <span>{status?.path || "…"}</span>
-                  <Button variant="ghost" size="icon" className="-my-1 size-6 shrink-0 text-muted-foreground" aria-label="Open the backup folder" title="Open the backup folder" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
+                  <Button variant="ghost" size="icon" className="-my-1 size-6 shrink-0 text-muted-foreground" aria-label="Open the backup folder" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
                     <FolderOpen className="size-3.5" />
                   </Button>
                 </span>
@@ -101,9 +101,9 @@ export function SyncDialog({
           </div>
 
           {busy && (
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <Progress value={pct} />
-              <p className="truncate text-xs text-muted-foreground">
+              <p className="block w-full min-w-0 truncate text-xs text-muted-foreground">
                 {prog ? `${prog.phase} ${prog.done.toLocaleString()} of ${prog.total.toLocaleString()} · ${prog.current}` : "Getting ready…"}
               </p>
             </div>
@@ -119,8 +119,11 @@ export function SyncDialog({
             </Button>
           </div>
 
-          <div className="flex items-start justify-between gap-3 rounded-lg border p-3">
-            <div className="min-w-0">
+          <div className="flex items-center gap-3 rounded-lg border p-3">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+              <RefreshCw className="size-4 text-muted-foreground" strokeWidth={1.5} />
+            </div>
+            <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">Sync when ChatVault opens</p>
               <p className="text-xs text-muted-foreground">Only new and changed chats are copied.</p>
             </div>
