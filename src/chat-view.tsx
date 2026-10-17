@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { ChatImage, GalleryContext, Lightbox } from "@/image-viewer";
+import { animateScroll } from "react-scroll";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   Archive,
   ArrowDown,
@@ -14,6 +17,7 @@ import {
   FileText,
   ListTree,
   Loader2,
+ 
   Pencil,
   Pin,
   PinOff,
@@ -56,6 +60,9 @@ type Props = {
   chat: Chat;
   page: MsgPage | null;
   loadingEarlier: boolean;
+  live?: boolean;
+  outline?: { ts: string; text: string }[] | null;
+  onLoadUntil?: (ts: string) => Promise<void>;
   onLoadEarlier: () => void;
   onLoadAll: () => Promise<void>;
   showSteps: boolean;
@@ -87,11 +94,14 @@ export function ChatView(p: Props) {
   const [cur, setCur] = useState(0);
   const [showJump, setShowJump] = useState(false);
   const [atTop, setAtTop] = useState(true);
+  const [atEnd, setAtEnd] = useState(false);
   const [activeTick, setActiveTick] = useState(0);
   const [loadingAll, setLoadingAll] = useState(false);
+  const [viewer, setViewer] = useState<number | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const els = useRef<Record<number, HTMLElement | null>>({});
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [margin, setMargin] = useState(0);
 
   const merged = useMemo(() => (page ? mergeResults(page.messages) : []), [page]);
   const shown = useMemo(() => merged.filter((m) => p.showSteps || (m.kind !== "tool" && m.kind !== "reasoning")), [merged, p.showSteps]);
@@ -117,19 +127,6 @@ export function ChatView(p: Props) {
     };
   }, [viewport, chat.id, ready]);
 
-  /** Scrolls an element into place, with the same easing as the wheel. */
-  const goTo = useCallback(
-    (node: HTMLElement | null | undefined, align: "start" | "center") => {
-      const el = viewport();
-      if (!node || !el) return;
-      const top = el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top;
-      const target = align === "center" ? top - (el.clientHeight / 2 - node.offsetHeight / 2) : top - 16;
-      if (lenisRef.current) lenisRef.current.scrollTo(Math.max(0, target), { duration: 1 });
-      else el.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
-    },
-    [viewport],
-  );
-
   // Consecutive tool steps collapse into one Trace.
   const blocks = useMemo(() => {
     const out: Block[] = [];
@@ -145,6 +142,179 @@ export function ChatView(p: Props) {
     return out;
   }, [shown]);
 
+  // Stable keys keep measured heights when earlier messages are added above.
+  const keys = useMemo(() => {
+    const seen = new Map<string, number>();
+    const list = blocks.map((b) => {
+      const m = b.kind === "trace" ? b.items[0].m : b.m;
+      const base = `${b.kind}|${m.ts ?? ""}|${m.role}|${m.text.slice(0, 48)}`;
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      return `${base}|${n}`;
+    });
+    return list;
+  }, [blocks]);
+  const blockOf = useMemo(() => {
+    const out: number[] = [];
+    blocks.forEach((b, bi) => {
+      if (b.kind === "trace") b.items.forEach((t) => (out[t.i] = bi));
+      else out[b.i] = bi;
+    });
+    return out;
+  }, [blocks]);
+
+  const virt = useVirtualizer({
+    count: blocks.length,
+    getScrollElement: viewport,
+    estimateSize: (i) => (blocks[i]?.kind === "trace" ? 36 : blocks[i]?.kind === "msg" ? 150 : 90),
+    overscan: 6,
+    scrollMargin: margin,
+    getItemKey: (i) => keys[i] ?? i,
+    useAnimationFrameWithResizeObserver: true,
+  });
+  // Keep the message you are reading in the same place when messages are added above it.
+  const lastAnchor = useRef<{ key: string; delta: number } | null>(null);
+  const pinning = useRef(false);
+  useLayoutEffect(() => {
+    const a = lastAnchor.current;
+    const el = viewport();
+    if (a && el && !pinning.current) {
+      const idx = keys.indexOf(a.key);
+      const off = idx >= 0 ? virt.getOffsetForIndex(idx, "start") : null;
+      if (off) {
+        const want = off[0] - a.delta;
+        if (Math.abs(want - el.scrollTop) > 2) {
+          lenisRef.current?.scrollTo(want, { immediate: true, force: true });
+          el.scrollTop = want;
+        }
+      }
+    }
+  }, [keys, virt, viewport]);
+  useLayoutEffect(() => {
+    const el = viewport();
+    const v0 = virt.getVirtualItems()[0];
+    lastAnchor.current = el && v0 ? { key: String(v0.key), delta: v0.start - el.scrollTop } : null;
+  });
+  // New messages that arrive while you are reading at the bottom are followed; if you scrolled up, your place is kept.
+  /** Animated scroll with react-scroll. Lenis steps aside while it runs so the two never fight. */
+  const SCROLL_ID = "chatvault-messages";
+  const animateTo = useCallback(
+    (y: number, ms: number, done?: () => void) => {
+      const el = viewport();
+      if (!el) return;
+      el.id = SCROLL_ID;
+      lenisRef.current?.stop();
+      animateScroll.scrollTo(Math.max(0, y), { containerId: SCROLL_ID, duration: ms, smooth: "easeInOutCubic" });
+      window.setTimeout(() => {
+        lenisRef.current?.start();
+        done?.();
+      }, ms + 40);
+    },
+    [viewport],
+  );
+  const jumpNow = useCallback(
+    (y: number) => {
+      const el = viewport();
+      if (!el) return;
+      lenisRef.current?.scrollTo(y, { immediate: true, force: true });
+      el.scrollTop = y;
+    },
+    [viewport],
+  );
+
+  const nearBottom = useRef(true);
+  useEffect(() => {
+    if (!nearBottom.current) return;
+    const id = requestAnimationFrame(() => {
+      const el = viewport();
+      if (!el) return;
+      animateTo(el.scrollHeight, 600);
+    });
+    return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page?.total, p.live]);
+  // A chat opens at its latest message. Row heights settle as they are measured and earlier messages load above,
+  // so the view stays pinned to the bottom until everything has settled, or until you scroll yourself.
+  const partialNow = useRef(false);
+  partialNow.current = !!page?.partial;
+  useLayoutEffect(() => {
+    if (!ready) return;
+    const el = viewport();
+    if (!el) return;
+    let stop = false;
+    let lastSH = 0;
+    let changed = performance.now();
+    pinning.current = true;
+    const hardEnd = performance.now() + 30000;
+    const cancel = () => {
+      stop = true;
+      pinning.current = false;
+    };
+    const evs = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    evs.forEach((e) => el.addEventListener(e, cancel, { passive: true, once: true }));
+    const tick = () => {
+      if (stop) return;
+      const now = performance.now();
+      // Done once the full page is in and the content height has stopped changing.
+      if (el.scrollHeight !== lastSH) {
+        lastSH = el.scrollHeight;
+        changed = now;
+      }
+      if (!partialNow.current && now - changed > 700) {
+        pinning.current = false;
+        return;
+      }
+      if (now > hardEnd) {
+        pinning.current = false;
+        return;
+      }
+      el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(tick);
+    };
+    tick();
+    return () => {
+      stop = true;
+      pinning.current = false;
+      evs.forEach((e) => el.removeEventListener(e, cancel));
+    };
+  }, [ready, chat.id, viewport]);
+  useLayoutEffect(() => setMargin(listRef.current?.offsetTop ?? 0), [page?.start, ready]);
+
+  /** Scrolls a message into place with the wheel's easing. Rows are measured as they appear, so it settles on the exact spot at the end. */
+  const goTo = useCallback(
+    (shownIdx: number, align: "start" | "center", instant = false) => {
+      const el = viewport();
+      const bi = blockOf[shownIdx];
+      if (!el || bi === undefined) return;
+      const spot = () => {
+        const r = virt.getOffsetForIndex(bi, align === "center" ? "center" : "start");
+        return Math.max(0, (r ? r[0] : 0) - (align === "center" ? 0 : 16));
+      };
+      const target = spot();
+      if (instant) {
+        // Straight there, then re-check as the rows around it are measured.
+        jumpNow(target);
+        requestAnimationFrame(() => jumpNow(spot()));
+        window.setTimeout(() => jumpNow(spot()), 120);
+        window.setTimeout(() => jumpNow(spot()), 320);
+        return;
+      }
+      const dist = target - el.scrollTop;
+      // A long way off first hops to just short of the spot, then glides in, so it never sweeps through thousands of rows.
+      if (Math.abs(dist) > el.clientHeight * 2.5) jumpNow(Math.max(0, target - Math.sign(dist) * el.clientHeight * 1.2));
+      const settle = (tries: number) => {
+        const t = spot();
+        if (Math.abs(t - el.scrollTop) > 6 && tries > 0) animateTo(t, 250, () => settle(tries - 1));
+      };
+      animateTo(target, 800, () => settle(2));
+    },
+    [viewport, blockOf, virt, animateTo, jumpNow],
+  );
+
+  const images = useMemo(() => shown.filter((m) => m.kind === "image" && typeof m.data === "string").map((m) => m.data as string), [shown]);
+  const gallery = useMemo(() => ({ images, open: (src: string) => setViewer(Math.max(0, images.indexOf(src))) }), [images]);
+  useEffect(() => setViewer(null), [chat.id]);
+
   const query = searchOpen ? q.trim() : "";
   const matches = useMemo(() => {
     if (!query) return [] as number[];
@@ -158,7 +328,7 @@ export function ChatView(p: Props) {
   useEffect(() => setCur(0), [query, chat.id]);
   useEffect(() => {
     if (matchIndex < 0) return;
-    goTo(els.current[matches[matchIndex]], "center");
+    goTo(matches[matchIndex], "center");
   }, [matchIndex, matches, goTo]);
 
   useEffect(() => {
@@ -181,22 +351,35 @@ export function ChatView(p: Props) {
     setQ("");
   }, [chat.id, viewport]);
 
+  const live = useRef({ start: 0, loading: false, partial: false, loadEarlier: p.onLoadEarlier });
+  live.current = { start: page?.start ?? 0, loading: p.loadingEarlier, partial: !!page?.partial, loadEarlier: p.onLoadEarlier };
   const ticks = useMemo(() => shown.map((m, i) => ({ m, i })).filter((t) => t.m.role === "user" && t.m.kind === "text"), [shown]);
   useEffect(() => {
     const el = viewport();
     if (!el) return;
     let raf = 0;
     const onScroll = () => {
+      // Near the top of what is loaded, the next earlier messages are read; the view stays where it is.
+      if (live.current.start > 0 && !live.current.loading && !live.current.partial && !pinning.current && el.scrollTop - margin < 60) live.current.loadEarlier();
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
+        nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 240;
         setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 400);
         setAtTop(el.scrollTop < 8);
+        setAtEnd(el.scrollHeight - el.scrollTop - el.clientHeight < 8);
         const line = el.scrollTop + 120;
+        // Ticks are in page order, so a binary search over the row positions finds the current one.
+        let lo = 0;
+        let hi = ticks.length - 1;
         let active = 0;
-        ticks.forEach((t, k) => {
-          const node = els.current[t.i];
-          if (node && node.offsetTop <= line) active = k;
-        });
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          const row = virt.measurementsCache[blockOf[ticks[mid].i]];
+          if (row && row.start <= line) {
+            active = mid;
+            lo = mid + 1;
+          } else hi = mid - 1;
+        }
         setActiveTick(active);
       });
     };
@@ -206,7 +389,7 @@ export function ChatView(p: Props) {
       el.removeEventListener("scroll", onScroll);
       cancelAnimationFrame(raf);
     };
-  }, [viewport, ticks, page]);
+  }, [viewport, ticks, page, virt, blockOf, margin]);
 
 
   const loadAll = async () => {
@@ -224,11 +407,42 @@ export function ChatView(p: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsAll]);
 
-  const step = Math.max(1, Math.ceil(ticks.length / 60));
-  const sampled = ticks.filter((_, k) => k % step === 0 || k === activeTick);
+  // The timeline covers the whole chat: ticks come from the light outline, and the ones already loaded jump straight there.
+  const barTicks = useMemo(() => {
+    const keyOf = (ts: string, text: string) => `${ts}|${text.trim().slice(0, 60)}`;
+    const loaded = new Map<string, number>();
+    ticks.forEach((t, k) => loaded.set(keyOf(t.m.ts ?? "", t.m.text), k));
+    const out: { key: string; i: number; text: string; ts?: string; loaded: boolean; k: number }[] = [];
+    const used = new Set<string>();
+    (p.outline ?? []).forEach((o) => {
+      const key = keyOf(o.ts, o.text);
+      const k = loaded.get(key);
+      used.add(key);
+      out.push({ key, i: k !== undefined ? ticks[k].i : -1, text: o.text, ts: o.ts, loaded: k !== undefined, k: k ?? -1 });
+    });
+    ticks.forEach((t, k) => {
+      const key = keyOf(t.m.ts ?? "", t.m.text);
+      if (!used.has(key)) out.push({ key, i: t.i, text: t.m.text, ts: t.m.ts, loaded: true, k });
+    });
+    return out;
+  }, [ticks, p.outline]);
+  const step = Math.max(1, Math.ceil(barTicks.length / 60));
+  const sampled = barTicks.filter((t, n) => n % step === 0 || (t.loaded && t.k === activeTick));
+  const pending = useRef<string | null>(null);
+  useEffect(() => {
+    const key = pending.current;
+    if (!key) return;
+    const hit = barTicks.find((t) => t.key === key && t.loaded);
+    if (hit) {
+      pending.current = null;
+      goTo(hit.i, "start", true);
+    }
+  }, [barTicks, goTo]);
 
   return (
+    <GalleryContext.Provider value={gallery}>
     <div className="flex min-h-0 flex-1 flex-col">
+      {viewer !== null && <Lightbox images={images} index={Math.min(viewer, images.length - 1)} onIndex={setViewer} onClose={() => setViewer(null)} />}
       {!page ? (
         <HeaderSkeleton />
       ) : (
@@ -241,6 +455,14 @@ export function ChatView(p: Props) {
             <div className="min-w-0 flex-1">
               <div className="group/title flex items-center gap-1">
                 <h2 className="truncate text-base font-medium leading-tight">{chat.title}</h2>
+                {p.live && (
+                  <Tip label={`${PROVIDER_SHORT[chat.provider]} is working in this chat right now`}>
+                    <span className="relative ml-1 flex size-2 shrink-0">
+                      <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                      <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                    </span>
+                  </Tip>
+                )}
                 <Tip label="Rename this chat in ChatVault.">
                   <Button variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground opacity-0 group-hover/title:opacity-100 focus-visible:opacity-100" aria-label="Rename" onClick={p.onRename}>
                     <Pencil className="size-3.5" />
@@ -253,7 +475,7 @@ export function ChatView(p: Props) {
                   chat.backup ? { icon: Archive, label: "Backup copy" } : null,
                   { icon: Clock, label: fmtDate(chat.lastMs) },
                   { icon: HardDrive, label: fmtSize(chat.size) },
-                  { icon: MessageSquare, label: `${page.total.toLocaleString()} messages` },
+                  { icon: MessageSquare, label: page.partial ? "Loading messages…" : `${page.total.toLocaleString()} messages` },
                 ]
                   .filter((m): m is { icon: typeof Cpu; label: string } => m !== null)
                   .map((m) => (
@@ -331,33 +553,53 @@ export function ChatView(p: Props) {
           {!page ? (
             <MessagesSkeleton />
           ) : (
-            <div className="mx-auto max-w-3xl space-y-7 px-4 pb-24 pt-4">
-              {page.start > 0 && (
-                <div className="flex justify-center">
+            <div className="mx-auto max-w-3xl px-4 pb-10 pt-4">
+              {page.partial && (
+                <div className="flex items-center justify-center gap-2 pb-7 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" /> Loading…
+                </div>
+              )}
+              {!page.partial && page.start > 0 && (
+                <div className="flex justify-center pb-7">
                   <Button size="sm" variant="outline" onClick={p.onLoadEarlier} disabled={p.loadingEarlier}>
                     {p.loadingEarlier ? <Loader2 className="size-4 animate-spin" /> : <ChevronUp className="size-4" />}
                     Load earlier messages ({page.start.toLocaleString()} more)
                   </Button>
                 </div>
               )}
-              {blocks.map((b) =>
-                b.kind === "plan" ? (
-                  <div key={`${page.start}-p${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
-                    <PlanBlock item={b.m} />
+              <div ref={listRef} className="relative w-full" style={{ height: virt.getTotalSize() }}>
+                {virt.getVirtualItems().map((vi) => {
+                  const b = blocks[vi.index];
+                  if (!b) return null;
+                  return (
+                    <div key={vi.key} data-index={vi.index} ref={virt.measureElement} className="absolute left-0 top-0 w-full pb-7" style={{ transform: `translateY(${vi.start - margin}px)` }}>
+                      {b.kind === "plan" ? (
+                        <PlanBlock item={b.m} />
+                      ) : b.kind === "agent" ? (
+                        <SubagentBlock item={b.m} />
+                      ) : b.kind === "trace" ? (
+                        <StepsTrace items={b.items} q={query} />
+                      ) : (
+                        <MessageRow m={b.m} provider={chat.provider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {p.live && (
+                <div className="flex items-center gap-3 pt-2" aria-live="polite">
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted">
+                    <ProviderLogo provider={chat.provider} className="size-5 animate-pulse" />
                   </div>
-                ) : b.kind === "agent" ? (
-                  <div key={`${page.start}-a${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
-                    <SubagentBlock item={b.m} />
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <span className="animate-pulse">{PROVIDER_SHORT[chat.provider]} is working</span>
+                    <span className="flex gap-[3px]">
+                      {[0, 200, 400].map((d) => (
+                        <span key={d} className="size-[3px] animate-pulse rounded-full bg-muted-foreground/60" style={{ animationDelay: `${d}ms`, animationDuration: "1.4s" }} />
+                      ))}
+                    </span>
                   </div>
-                ) : b.kind === "trace" ? (
-                  <div key={`${page.start}-t${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
-                    <StepsTrace items={b.items} q={query} />
-                  </div>
-                ) : (
-                  <div key={`${page.start}-${b.i}`} ref={(el) => { els.current[b.i] = el; }}>
-                    <MessageRow m={b.m} provider={chat.provider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} />
-                  </div>
-                ),
+                </div>
               )}
             </div>
           )}
@@ -365,13 +607,25 @@ export function ChatView(p: Props) {
 
         {page && sampled.length >= 3 && (
           <ConversationBar
-            ticks={sampled.map((t) => ({ i: t.i, text: t.m.text, ts: t.m.ts, active: ticks.indexOf(t) === activeTick }))}
-            onPick={(i) => goTo(els.current[i], "start")}
+            ticks={sampled.map((t, n) => ({ i: n, text: t.text, ts: t.ts ?? "", active: t.loaded && t.k === activeTick }))}
+            onNear={(n) => {
+              const t = sampled[n];
+              if (t && !t.loaded && p.onLoadUntil && t.ts) void p.onLoadUntil(t.ts);
+            }}
+            onPick={(n) => {
+              const t = sampled[n];
+              if (!t) return;
+              if (t.loaded) goTo(t.i, "start", true);
+              else if (p.onLoadUntil && t.ts) {
+                pending.current = t.key;
+                void p.onLoadUntil(t.ts);
+              }
+            }}
           />
         )}
 
         <div className={cn("pointer-events-none absolute inset-x-0 top-0 z-10 h-12 bg-gradient-to-b from-background via-background/70 to-transparent transition-opacity duration-200", atTop ? "opacity-0" : "opacity-100")} />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-20 bg-gradient-to-t from-background via-background/70 to-transparent" />
+        <div className={cn("pointer-events-none absolute inset-x-0 bottom-0 z-10 h-20 bg-gradient-to-t from-background via-background/70 to-transparent transition-opacity duration-200", atEnd ? "opacity-0" : "opacity-100")} />
 
         {showJump && (
           <Button
@@ -381,8 +635,10 @@ export function ChatView(p: Props) {
             onClick={() => {
               const el = viewport();
               if (!el) return;
-              if (lenisRef.current) lenisRef.current.scrollTo(el.scrollHeight, { duration: 1.2 });
-              else el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+              // Straight to the end, then once more as the last rows are measured.
+              jumpNow(el.scrollHeight);
+              requestAnimationFrame(() => jumpNow(el.scrollHeight));
+              window.setTimeout(() => jumpNow(el.scrollHeight), 120);
             }}
           >
             <ArrowDown className="size-4" />
@@ -390,12 +646,13 @@ export function ChatView(p: Props) {
         )}
       </div>
     </div>
+    </GalleryContext.Provider>
   );
 }
 
 function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void }) {
   const actions = chatActions(chat, toast, msgs);
-  const groups = ["Continue", "Open", "Copy", "Save"] as const;
+  const groups = ["Continue", "More"] as const;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button size="sm" />}>
@@ -412,7 +669,7 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
           </DropdownMenuItem>
         </DropdownMenuGroup>
         {groups.map((g) => {
-          const items = actions.filter((a) => a.group === g);
+          const items = actions.filter((a) => (g === "More" ? ["Open", "Copy", "Save"].includes(a.group) : a.group === g));
           if (!items.length) return null;
           return (
             <div key={g}>
@@ -422,7 +679,7 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
                 {items.map((a) => {
                   const Icon = a.icon;
                   return (
-                    <DropdownMenuItem key={a.id} title={a.hint} onClick={() => a.run().catch((e) => toast(String(e)))}>
+                    <DropdownMenuItem key={a.id} onClick={() => a.run().catch((e) => toast(String(e)))}>
                       <Icon className="size-4" strokeWidth={1.5} /> {a.label}
                     </DropdownMenuItem>
                   );
@@ -536,6 +793,11 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
             </MiniAction>
           </div>
         </MessageHeader>
+        {m.kind === "image" && typeof m.data === "string" ? (
+          <div className={cn("max-w-full", isUser && "flex justify-end")}>
+            <ChatImage src={m.data} />
+          </div>
+        ) : (
         <Bubble variant={isUser ? "secondary" : "outline"} className="max-w-full">
           <BubbleContent className="overflow-visible">
             {m.kind === "image" ? <span className="text-muted-foreground">[Image]</span> : <MessageBody text={text} q={q} active={isCurrentMatch} assistant={!isUser} />}
@@ -546,6 +808,7 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
             )}
           </BubbleContent>
         </Bubble>
+        )}
       </MessageContent>
     </Message>
   );
@@ -571,7 +834,7 @@ const PAD = 12; // top padding of the bar, in px
  * turns dark and previews that question. The pointer position is turned into a tick index with plain
  * arithmetic and animated with transforms, so nothing is measured while you move.
  */
-function ConversationBar({ ticks, onPick }: { ticks: BarTick[]; onPick: (i: number) => void }) {
+function ConversationBar({ ticks, onPick, onNear }: { ticks: BarTick[]; onPick: (i: number) => void; onNear?: (i: number) => void }) {
   const navRef = useRef<HTMLElement | null>(null);
   const topRef = useRef(0);
   const frame = useRef(0);
@@ -588,6 +851,13 @@ function ConversationBar({ ticks, onPick }: { ticks: BarTick[]; onPick: (i: numb
   const head = near?.text.trim().split("\n")[0] ?? "";
 
   useEffect(() => () => cancelAnimationFrame(frame.current), []);
+  // Hovering a tick lets the chat quietly fetch what that tick needs, so the click lands without any waiting.
+  useEffect(() => {
+    if (nearest < 0 || !onNear) return;
+    const t = window.setTimeout(() => onNear(nearest), 120);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nearest]);
 
   return (
     <nav

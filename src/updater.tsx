@@ -1,6 +1,6 @@
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { toast } from "sonner";
+import hot from "react-hot-toast";
 
 let running = false;
 
@@ -14,25 +14,34 @@ export async function autoUpdate() {
   try {
     const update = await check();
     if (!update) return;
-    const id = toast.loading(`Updating ChatVault to ${update.version}`, { description: "Downloading in the background." });
+    const id = hot.loading(`Updating ChatVault to ${update.version}…`);
     let total = 0;
     let got = 0;
     await update.downloadAndInstall((ev) => {
       if (ev.event === "Started") total = ev.data.contentLength ?? 0;
       if (ev.event === "Progress") {
         got += ev.data.chunkLength;
-        if (total) toast.loading(`Updating ChatVault to ${update.version}`, { id, description: `${Math.round((got / total) * 100)}% downloaded` });
+        if (total) hot.loading(`Updating ChatVault to ${update.version}… ${Math.round((got / total) * 100)}%`, { id });
       }
-      if (ev.event === "Finished") {
-        toast.loading(`Installing ChatVault ${update.version}`, { id, description: "ChatVault will restart by itself." });
-      }
+      if (ev.event === "Finished") hot.loading(`Installing ChatVault ${update.version}. It will restart by itself.`, { id });
     });
-    toast.success(`ChatVault ${update.version} is ready`, {
-      id,
-      description: "Restart to finish updating.",
-      duration: Infinity,
-      action: { label: "Restart now", onClick: () => void relaunch() },
-    });
+    hot.success(
+      (t) => (
+        <span className="flex items-center gap-3">
+          <span>ChatVault {update.version} is ready.</span>
+          <button
+            className="rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted"
+            onClick={() => {
+              hot.dismiss(t.id);
+              void relaunch();
+            }}
+          >
+            Restart now
+          </button>
+        </span>
+      ),
+      { id, duration: Infinity },
+    );
   } catch (e) {
     // Offline, or no release has been published yet. Try again later.
     console.warn("Update check failed", e);

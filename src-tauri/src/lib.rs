@@ -95,6 +95,388 @@ async fn chats_by_ids(provider: String, ids: Vec<String>) -> Result<Vec<ChatSumm
 }
 
 /// A window of messages. `before` is a message index; without it the newest `limit` messages come back.
+#[derive(serde::Serialize)]
+struct OutlineTick {
+    ts: String,
+    text: String,
+}
+
+/// A light outline of the whole chat for the side timeline: only your messages, each cut short, and at most 240 of them.
+/// Only the lines that hold your messages are parsed, and nothing is sent to the page except these few ticks.
+#[tauri::command]
+async fn chat_outline(provider: String, path: String) -> Result<Vec<OutlineTick>, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if provider == "cursor" {
+            return Err("not supported".to_string());
+        }
+        let p = check_transcript(&path)?;
+        let lines = open_lines(&p).ok_or("Cannot open that chat")?;
+        let mut ticks: Vec<OutlineTick> = Vec::new();
+        for line in lines {
+            let user_line = if provider == "codex" {
+                line.contains("\"response_item\"") && line.contains("\"role\":\"user\"")
+            } else {
+                line.contains("\"type\":\"user\"")
+            };
+            if !user_line {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            for m in messages_for(&provider, &v) {
+                if m.role == "user" && m.kind == "text" && !m.text.trim().is_empty() {
+                    ticks.push(OutlineTick { ts: m.ts.clone(), text: clip(m.text.trim(), 140) });
+                }
+            }
+        }
+        if ticks.len() > 240 {
+            let n = ticks.len();
+            let keep: Vec<usize> = (0..240).map(|k| k * (n - 1) / 239).collect();
+            ticks = keep.into_iter().map(|i| OutlineTick { ts: ticks[i].ts.clone(), text: ticks[i].text.clone() }).collect();
+        }
+        Ok(ticks)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn new_session_id() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut b = [0u8; 16];
+    for half in 0..2 {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.write_u32(std::process::id());
+        b[half * 8..half * 8 + 8].copy_from_slice(&h.finish().to_le_bytes());
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let x: Vec<String> = b.iter().map(|v| format!("{v:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", x[0..4].concat(), x[4..6].concat(), x[6..8].concat(), x[8..10].concat(), x[10..16].concat())
+}
+
+#[derive(serde::Serialize)]
+struct Forked {
+    id: String,
+    path: String,
+}
+
+/// Makes a copy of a chat with its own session id, next to the original, so it shows up as a new chat at once.
+/// Nothing is opened and the original file is never touched.
+#[tauri::command]
+async fn fork_chat(provider: String, path: String) -> Result<Forked, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Write;
+        if provider == "cursor" {
+            return Err("Cursor chats cannot be forked. Use Continue in Claude or Codex instead.".to_string());
+        }
+        let src = check_transcript(&path)?;
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let stem = stem.strip_suffix(".jsonl").unwrap_or(&stem).to_string();
+        let dir = src.parent().ok_or("Cannot find the chat folder")?.to_path_buf();
+        let new_id = new_session_id();
+        // Claude names the file by its id; Codex puts the id at the end of "rollout-<time>-<id>".
+        let (old_id, new_name) = if provider == "codex" {
+            if stem.len() < 36 {
+                return Err("Cannot read that Codex chat id".to_string());
+            }
+            let (head, id) = stem.split_at(stem.len() - 36);
+            (id.to_string(), format!("{head}{new_id}.jsonl"))
+        } else {
+            (stem.clone(), format!("{new_id}.jsonl"))
+        };
+        let dest = dir.join(&new_name);
+        let lines = open_lines(&src).ok_or("Cannot open that chat")?;
+        let tmp = dir.join(format!("{new_name}.tmp"));
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(|e| e.to_string())?);
+            for line in lines {
+                let out = if line.contains(&old_id) { line.replace(&old_id, &new_id) } else { line };
+                w.write_all(out.as_bytes()).map_err(|e| e.to_string())?;
+                w.write_all(b"\n").map_err(|e| e.to_string())?;
+            }
+            w.flush().map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+        Ok(Forked { id: new_id, path: dest.to_string_lossy().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// (file count, newest change) across Claude and Codex chats, for spotting new conversations as they start.
+#[tauri::command]
+fn files_fingerprint() -> (usize, i64) {
+    index::files_fingerprint()
+}
+
+/// Changes whenever Cursor writes to its chat storage, so the list can follow a Cursor chat as it happens.
+#[tauri::command]
+fn cursor_fingerprint() -> i64 {
+    cursor::fingerprint()
+}
+
+struct Started {
+    child: std::process::Child,
+    err_path: std::path::PathBuf,
+}
+
+/// Agents that ChatVault started in the background, by "provider:id", so they can be stopped and their state shown.
+static RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Started>>> = std::sync::OnceLock::new();
+/// What an agent printed to its error stream when it ended badly, kept until the page asks for it.
+static LAST_ERR: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+
+fn running() -> &'static std::sync::Mutex<std::collections::HashMap<String, Started>> {
+    RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+fn last_err() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    LAST_ERR.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The newest installed Cursor agent: its own node and script, run directly so the message never passes through a shell.
+fn cursor_agent_entry() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("cursor-agent").join("versions");
+    let mut dirs: Vec<_> = std::fs::read_dir(root).ok()?.flatten().filter(|e| e.path().join("index.js").exists() && e.path().join("node.exe").exists()).collect();
+    dirs.sort_by_key(|e| e.file_name());
+    let d = dirs.pop()?.path();
+    Some((d.join("node.exe"), d.join("index.js")))
+}
+
+fn finish(map: &mut std::collections::HashMap<String, Started>, key: &str) {
+    if let Some(mut st) = map.remove(key) {
+        let ok = st.child.try_wait().ok().flatten().map(|s| s.success()).unwrap_or(true);
+        if !ok {
+            if let Ok(txt) = std::fs::read_to_string(&st.err_path) {
+                let t = txt.trim();
+                if !t.is_empty() {
+                    if let Ok(mut e) = last_err().lock() {
+                        e.insert(key.to_string(), t.lines().last().unwrap_or(t).chars().take(300).collect());
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&st.err_path);
+    }
+}
+
+/// Sends a message into an existing Claude Code, Codex or Cursor session, with no terminal. The agent runs hidden in the chat's
+/// own folder and appends to the same session, so the reply shows up live here and in the other app. It runs with full access.
+#[tauri::command]
+fn send_message(provider: String, id: String, cwd: Option<String>, message: String) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    provider_ok(&provider)?;
+    if message.trim().is_empty() {
+        return Err("Write a message first.".into());
+    }
+    let key = format!("{provider}:{id}");
+    let mut map = running().lock().map_err(|_| "busy".to_string())?;
+    if let Some(st) = map.get_mut(&key) {
+        if matches!(st.child.try_wait(), Ok(None)) {
+            return Err("The agent is still working on the previous message.".into());
+        }
+        finish(&mut map, &key);
+    }
+    if let Ok(mut e) = last_err().lock() {
+        e.remove(&key);
+    }
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let dir = cwd.filter(|d| Path::new(d).is_dir());
+    let (mut cmd, name, via_stdin) = match provider.as_str() {
+        "codex" => {
+            let mut c = Command::new("codex");
+            c.args(["exec", "resume", &id, "--dangerously-bypass-approvals-and-sandbox", "-"]);
+            (c, "Codex", true)
+        }
+        "cursor" => {
+            let (node, entry) = cursor_agent_entry().ok_or("Cursor's agent is not installed. Install it from cursor.com/cli.")?;
+            let chat_id = id.rsplit(['\\', '/', ':']).next().unwrap_or(&id).to_string();
+            let mut c = Command::new(node);
+            c.arg(entry).args(["-p", "--resume", &chat_id, "--force", "--trust"]);
+            if let Some(d) = &dir {
+                c.arg("--workspace").arg(d);
+            }
+            c.arg(&message);
+            c.env("CURSOR_INVOKED_AS", "cursor-agent.cmd");
+            (c, "Cursor", false)
+        }
+        _ => {
+            let mut c = Command::new("claude");
+            c.args(["-p", "--resume", &id, "--dangerously-skip-permissions"]);
+            (c, "Claude Code", true)
+        }
+    };
+    if let Some(d) = &dir {
+        cmd.current_dir(d);
+    }
+    let err_path = std::env::temp_dir().join(format!("chatvault-agent-{}.err", key.replace(':', "_")));
+    let err_file = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
+    let mut child = cmd
+        .stdin(if via_stdin { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(err_file))
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("Could not start {name}: {e}. Is it installed and on your PATH?"))?;
+    if via_stdin {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(message.as_bytes());
+        }
+    }
+    map.insert(key, Started { child, err_path });
+    Ok(())
+}
+
+/// Starts the tool's own sign-in (it opens your browser), so messages sent from ChatVault are allowed to run.
+#[tauri::command]
+fn agent_login(provider: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    provider_ok(&provider)?;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = match provider.as_str() {
+        "codex" => {
+            let mut c = Command::new("codex");
+            c.arg("login");
+            c
+        }
+        "cursor" => {
+            let (node, entry) = cursor_agent_entry().ok_or("Cursor's agent is not installed. Install it from cursor.com/cli.")?;
+            let mut c = Command::new(node);
+            c.arg(entry).arg("login");
+            c.env("CURSOR_INVOKED_AS", "cursor-agent.cmd");
+            c
+        }
+        _ => {
+            let mut c = Command::new("claude");
+            c.args(["auth", "login"]);
+            c
+        }
+    };
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn().map_err(|e| format!("Could not start the sign-in: {e}"))?;
+    Ok(())
+}
+
+/// Whether an agent started from ChatVault is still working on this chat.
+#[tauri::command]
+fn agent_running(provider: String, id: String) -> bool {
+    let key = format!("{provider}:{id}");
+    let Ok(mut map) = running().lock() else { return false };
+    let alive = map.get_mut(&key).map(|st| matches!(st.child.try_wait(), Ok(None)));
+    match alive {
+        Some(true) => true,
+        Some(false) => {
+            finish(&mut map, &key);
+            false
+        }
+        None => false,
+    }
+}
+
+/// The last error an agent from ChatVault ended with for this chat, once.
+#[tauri::command]
+fn take_agent_error(provider: String, id: String) -> Option<String> {
+    last_err().lock().ok()?.remove(&format!("{provider}:{id}"))
+}
+
+/// Stops the agent that ChatVault started for this chat.
+#[tauri::command]
+fn stop_agent(provider: String, id: String) -> bool {
+    let key = format!("{provider}:{id}");
+    let Ok(mut map) = running().lock() else { return false };
+    if let Some(mut st) = map.remove(&key) {
+        let _ = st.child.kill();
+        let _ = st.child.wait();
+        let _ = std::fs::remove_file(&st.err_path);
+        return true;
+    }
+    false
+}
+
+/// When each listed chat file last changed (0 when unknown), so the list can show which chats an agent is writing to.
+#[tauri::command]
+fn chat_stamps(items: Vec<(String, String)>) -> Vec<u64> {
+    items
+        .into_iter()
+        .map(|(provider, path)| {
+            if provider == "cursor" {
+                return 0;
+            }
+            let Ok(p) = check_transcript(&path) else { return 0 };
+            std::fs::metadata(&p)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Size and modified time of a chat file, so the open chat can be checked for new messages without reading it.
+#[tauri::command]
+fn chat_stamp(provider: String, path: String) -> Result<(u64, u64), String> {
+    provider_ok(&provider)?;
+    let p = check_transcript(&path)?;
+    let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    let ms = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+    Ok((md.len(), ms))
+}
+
+/// The newest messages of a chat, read from the end of the file, so a chat can show its latest messages at once
+/// while the full page (with the total count) is still being worked out.
+#[tauri::command]
+async fn read_chat_tail(provider: String, path: String, limit: usize) -> Result<Vec<Msg>, String> {
+    provider_ok(&provider)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        if provider == "cursor" {
+            return Err("not supported".to_string());
+        }
+        let p = check_transcript(&path)?;
+        if p.extension().map(|e| e == "zst").unwrap_or(false) {
+            return Err("not supported".to_string());
+        }
+        let limit = limit.clamp(1, 400);
+        let mut f = std::fs::File::open(&p).map_err(|e| e.to_string())?;
+        let len = f.metadata().map_err(|e| e.to_string())?.len();
+        let mut pos = len;
+        let mut buf: Vec<u8> = Vec::new();
+        let chunk: u64 = 512 * 1024;
+        loop {
+            let take = chunk.min(pos);
+            pos -= take;
+            f.seek(SeekFrom::Start(pos)).map_err(|e| e.to_string())?;
+            let mut part = vec![0u8; take as usize];
+            f.read_exact(&mut part).map_err(|e| e.to_string())?;
+            part.extend_from_slice(&buf);
+            buf = part;
+            let text = String::from_utf8_lossy(&buf);
+            // Unless this reaches the start of the file, the first line may be cut in half.
+            let from = if pos > 0 { text.find('\n').map(|i| i + 1).unwrap_or(text.len()) } else { 0 };
+            let mut out: Vec<Msg> = Vec::new();
+            for line in text[from..].lines() {
+                if !relevant(&provider, line) {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                for m in messages_for(&provider, &v) {
+                    out.push(clip_msg(m, 30_000));
+                }
+            }
+            if out.len() >= limit || pos == 0 {
+                let skip = out.len().saturating_sub(limit);
+                return Ok(out.split_off(skip));
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn read_chat_page(provider: String, path: String, before: Option<usize>, limit: usize) -> Result<MsgPage, String> {
     provider_ok(&provider)?;
@@ -250,6 +632,11 @@ async fn delete_chat(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         if path.starts_with("cursor-") {
             return Err("Cursor chats live inside Cursor's own database, so they can only be deleted in Cursor".to_string());
+        }
+        // A file that is already gone (deleted outside ChatVault) only needs to leave the list.
+        if !Path::new(&path).exists() {
+            index::forget(&path)?;
+            return Ok(());
         }
         let p = check_transcript(&path)?;
         let plain = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
@@ -460,6 +847,18 @@ pub fn run() {
             chats_by_ids,
             overview_stats,
             read_chat_page,
+            read_chat_tail,
+            chat_stamp,
+            chat_stamps,
+            chat_outline,
+            cursor_fingerprint,
+            files_fingerprint,
+            send_message,
+            agent_running,
+            take_agent_error,
+            agent_login,
+            stop_agent,
+            fork_chat,
             read_chat_all,
             deep_search,
             reveal_in_folder,

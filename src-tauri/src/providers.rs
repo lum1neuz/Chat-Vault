@@ -23,6 +23,9 @@ pub struct Msg {
     pub error: Option<bool>,
 }
 
+/// Pictures larger than this are shown as a placeholder instead of being sent to the viewer.
+const IMAGE_MAX: usize = 4_000_000;
+
 impl Msg {
     pub fn new(role: &str, ts: &str, text: String, kind: &str) -> Msg {
         Msg { role: role.into(), ts: ts.into(), text, kind: kind.into(), id: None, name: None, data: None, error: None }
@@ -135,7 +138,19 @@ pub fn claude_messages(v: &Value) -> Vec<Msg> {
                             out.push(Msg::new(&role, &ts, clip(t, 6000), "reasoning"));
                         }
                     }
-                    "image" => out.push(Msg::new(&role, &ts, "[Image]".into(), "image")),
+                    "image" => {
+                        let mut m = Msg::new(&role, &ts, "[Image]".into(), "image");
+                        let src = b.get("source");
+                        let kind = src.and_then(|s| s.get("type")).and_then(|x| x.as_str()).unwrap_or("");
+                        let url = if kind == "base64" {
+                            let mt = src.and_then(|s| s.get("media_type")).and_then(|x| x.as_str()).unwrap_or("image/png");
+                            src.and_then(|s| s.get("data")).and_then(|x| x.as_str()).map(|d| format!("data:{mt};base64,{d}"))
+                        } else {
+                            src.and_then(|s| s.get("url")).and_then(|x| x.as_str()).map(|u| u.to_string())
+                        };
+                        m.data = url.filter(|u| u.len() <= IMAGE_MAX).map(Value::String);
+                        out.push(m);
+                    }
                     "tool_use" => {
                         let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
                         let input = b.get("input");
@@ -218,7 +233,11 @@ pub fn codex_messages(v: &Value) -> Vec<Msg> {
                         }
                         out.push(Msg::new(role, &ts, t.to_string(), "text"));
                     }
-                    "input_image" => out.push(Msg::new(role, &ts, "[Image]".into(), "image")),
+                    "input_image" => {
+                        let mut m = Msg::new(role, &ts, "[Image]".into(), "image");
+                        m.data = b.get("image_url").and_then(|x| x.as_str()).filter(|u| u.len() <= IMAGE_MAX).map(|u| Value::String(u.to_string()));
+                        out.push(m);
+                    }
                     _ => {}
                 }
             }

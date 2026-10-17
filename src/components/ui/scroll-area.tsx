@@ -4,12 +4,13 @@ import { cn } from "@/lib/utils"
 function ScrollArea({
   className,
   children,
+  horizontal = false,
   ...props
-}: ScrollAreaPrimitive.Root.Props) {
+}: ScrollAreaPrimitive.Root.Props & { horizontal?: boolean }) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
-      className={cn("relative", className)}
+      className={cn("group/scroll relative", className)}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
@@ -19,6 +20,7 @@ function ScrollArea({
         {children}
       </ScrollAreaPrimitive.Viewport>
       <ScrollBar />
+      {horizontal && <ScrollBar orientation="horizontal" />}
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   )
@@ -35,7 +37,7 @@ function ScrollBar({
       data-orientation={orientation}
       orientation={orientation}
       className={cn(
-        "flex touch-none p-px transition-colors select-none data-horizontal:h-2.5 data-horizontal:flex-col data-horizontal:border-t data-horizontal:border-t-transparent data-vertical:h-full data-vertical:w-2.5 data-vertical:border-l data-vertical:border-l-transparent",
+        "flex touch-none p-px opacity-40 transition-[opacity,colors] duration-200 select-none group-hover/scroll:opacity-100 data-scrolling:opacity-100 data-horizontal:h-1.5 data-horizontal:flex-col data-horizontal:border-t data-horizontal:border-t-transparent data-vertical:h-full data-vertical:w-1.5 data-vertical:border-l-0 data-vertical:pr-px",
         className
       )}
       {...props}

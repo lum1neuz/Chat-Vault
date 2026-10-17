@@ -212,11 +212,27 @@ fn parse_iso(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis())
 }
 
+/// Claude names a project folder after the path with every separator turned into "-". When the chat itself does not say
+/// where it ran, make that folder name readable instead of showing the whole encoded path.
+fn friendly_dir(name: &str) -> String {
+    if name.contains("Claude-scratch") || name.contains("scratch-workspaces") {
+        return "Claude scratch chat".to_string();
+    }
+    let mut rest = name;
+    if let Some(i) = name.find("-Users-") {
+        let after = &name[i + "-Users-".len()..];
+        // drop the user name too
+        rest = after.split_once('-').map(|(_, r)| r).unwrap_or(after);
+    }
+    let rest = rest.replace("---", " - ");
+    if rest.is_empty() { name.to_string() } else { rest }
+}
+
 fn project_of(cwd: &Option<String>, fallback: &str) -> String {
     cwd.as_ref()
         .and_then(|c| Path::new(c).file_name())
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| fallback.to_string())
+        .unwrap_or_else(|| friendly_dir(fallback))
 }
 
 struct Row {
@@ -282,7 +298,7 @@ fn build_row(
                 local_id: None,
                 title,
                 account: "unknown".into(),
-                project: dir_name,
+                project: friendly_dir(&dir_name),
                 cwd: None,
                 created_ms: None,
                 last_ms: mtime,
@@ -373,12 +389,21 @@ fn upsert(c: &Connection, r: &Row, replace: bool) -> rusqlite::Result<()> {
 }
 
 /// Brings the index up to date. Only files whose size or modified time changed are read again.
+/// How many chat files exist and when the newest changed, so new conversations can be spotted without scanning them.
+pub fn files_fingerprint() -> (usize, i64) {
+    let files = collect_files();
+    let newest = files.iter().map(|f| mtime_ms(&f.path).1).max().unwrap_or(0);
+    (files.len(), newest)
+}
+
 pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     if REFRESHING.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
     let result = (|| {
         let mut c = open_db()?;
+        // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
+        let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         let files = collect_files();
         let known: HashMap<String, (i64, i64)> = {
             let mut st = c.prepare("SELECT path,size,mtime FROM chats").map_err(|e| e.to_string())?;
