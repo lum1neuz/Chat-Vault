@@ -4,6 +4,7 @@ import {
   ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuGroup,
   ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuSub,
@@ -37,7 +38,13 @@ function Lines({ entries, onError }: { entries: Entry[]; onError: (e: unknown) =
     <>
       {tidy(entries).map((e, i) => {
         if (e.type === "sep") return <ContextMenuSeparator key={i} />;
-        if (e.type === "label") return <ContextMenuLabel key={i}>{e.label}</ContextMenuLabel>;
+        // A label must sit inside a group, or Base UI throws and the whole window goes blank.
+        if (e.type === "label")
+          return (
+            <ContextMenuGroup key={i}>
+              <ContextMenuLabel>{e.label}</ContextMenuLabel>
+            </ContextMenuGroup>
+          );
         if (e.type === "sub")
           return (
             <ContextMenuSub key={i}>

@@ -554,7 +554,7 @@ export function ChatView(p: Props) {
     }
     const moreCopies = ["copy-md", "copy-id", "fork"].map(find).filter((a): a is ChatAction => !!a);
     const commands = acts.filter((a) => a.group === "Copy" && a.id.startsWith("copy-") && !COPY_CONTENT_IDS.includes(a.id));
-    const copyLabel: Record<string, string> = { "copy-md": "Conversation as Markdown", "copy-id": "Chat ID" };
+    const copyLabel: Record<string, string> = { "copy-md": "Markdown", "copy-id": "Chat ID" };
     out.push({
       type: "sub",
       label: "More copy options",

@@ -1331,7 +1331,7 @@ function chatEntries(chat: Chat, toast: (m: string) => void, msgs: Msg[] | null,
   const handoff = continueTargets(all);
   const commands = all.filter(isToolCommand);
   const more: Entry[] = [
-    ...item(byId("copy-md"), "Conversation as Markdown"),
+    ...item(byId("copy-md"), "Markdown"),
     ...item(byId("copy-id"), "Chat ID"),
     ...item(byId("fork")),
     ...(commands.length ? ([{ type: "sep" }, { type: "label", label: "Copy the command to start" }, ...commands.flatMap((a) => item(a, shortName(a)))] as Entry[]) : []),
@@ -1397,6 +1397,8 @@ function ChatMenu({ chat, toast, msgs, getExtras }: { chat: Chat; toast: (m: str
     { items: files },
     { items: actions.filter((a) => a.danger) },
   ];
+  // Short names inside "More copy options": the panel title already says these are copies.
+  const SHORT_COPY: Record<string, string> = { "copy-md": "Markdown", "copy-id": "Chat ID" };
   const renderItem = (a: ChatAction, short = false) => {
     return (
       <button
@@ -1407,7 +1409,7 @@ function ChatMenu({ chat, toast, msgs, getExtras }: { chat: Chat; toast: (m: str
           void runAction(a.label, a.run);
         }}      >
         <ActionIcon action={a} className={cn("size-4", !a.logo && (a.danger ? "text-destructive" : "text-muted-foreground"))} />
-        {short ? shortName(a) : a.label}
+        {short ? shortName(a) : SHORT_COPY[a.id] ?? a.label}
       </button>
     );
   };
