@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const TOOLS: [&str; 3] = ["gemini", "opencode", "cline"];
+pub const TOOLS: [&str; 4] = ["gemini", "opencode", "cline", "claudeai"];
 
 pub struct OtherChat {
     pub provider: &'static str,
@@ -352,6 +352,182 @@ fn scan_cline(out: &mut Vec<OtherChat>) {
     }
 }
 
+// ---------------- Claude Chat (claude.ai) ----------------
+// These chats are not kept on the PC. They come from the claude.ai data export (Settings > Privacy > Export data),
+// split into one file per conversation inside the backup folder, so a shared backup folder brings them to the other PC.
+
+fn claudeai_dir() -> Option<PathBuf> {
+    backup_root().map(|b| b.join("claude-chat"))
+}
+
+fn claudeai_files() -> Vec<PathBuf> {
+    let Some(d) = claudeai_dir() else { return Vec::new() };
+    fs::read_dir(d)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e == "json").unwrap_or(false)).collect())
+        .unwrap_or_default()
+}
+
+pub fn claudeai_count() -> usize {
+    claudeai_files().len()
+}
+
+fn claudeai_messages(p: &Path) -> Vec<Msg> {
+    read_json(p).map(|j| claudeai_msgs(&j)).unwrap_or_default()
+}
+
+fn claudeai_msgs(j: &Value) -> Vec<Msg> {
+    let mut out = Vec::new();
+    for m in j.get("chat_messages").and_then(|m| m.as_array()).cloned().unwrap_or_default() {
+        let role = if m.get("sender").and_then(|s| s.as_str()) == Some("human") { "user" } else { "assistant" };
+        let ts = m.get("created_at").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let parts = m.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        let before = out.len();
+        for b in &parts {
+            match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "text" => {
+                    let t = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if !t.trim().is_empty() {
+                        out.push(Msg::new(role, &ts, t.to_string(), "text"));
+                    }
+                }
+                "thinking" => {
+                    let t = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    if !t.trim().is_empty() {
+                        out.push(Msg::new("assistant", &ts, clip(t, 6000), "reasoning"));
+                    }
+                }
+                "tool_use" => {
+                    let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
+                    let mut tool = Msg::new("assistant", &ts, format!("{}:", name), "tool");
+                    tool.name = Some(name);
+                    tool.id = b.get("id").and_then(|n| n.as_str()).map(String::from);
+                    tool.data = b.get("input").cloned();
+                    out.push(tool);
+                }
+                "tool_result" => {
+                    let text = match b.get("content").cloned().unwrap_or(Value::Null) {
+                        Value::String(s) => s,
+                        Value::Array(a) => a.iter().filter_map(|x| x.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"),
+                        other => other.to_string(),
+                    };
+                    if !text.trim().is_empty() {
+                        let mut res = Msg::new("assistant", &ts, clip(&text, 8000), "result");
+                        res.id = b.get("tool_use_id").and_then(|n| n.as_str()).map(String::from);
+                        out.push(res);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Older exports only have the flat text.
+        if out.len() == before {
+            let t = m.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if !t.trim().is_empty() {
+                out.push(Msg::new(role, &ts, t.to_string(), "text"));
+            }
+        }
+        for a in m.get("attachments").and_then(|a| a.as_array()).cloned().unwrap_or_default() {
+            let name = a.get("file_name").and_then(|n| n.as_str()).unwrap_or("file");
+            let body = a.get("extracted_content").and_then(|c| c.as_str()).unwrap_or("");
+            out.push(Msg::new(role, &ts, clip(&format!("Attached {name}\n\n{body}"), 8000), "text"));
+        }
+    }
+    out
+}
+
+fn scan_claudeai(out: &mut Vec<OtherChat>) {
+    for p in claudeai_files() {
+        let Some(j) = read_json(&p) else { continue };
+        let msgs = claudeai_msgs(&j);
+        let Some(first) = msgs.iter().find(|m| m.role == "user") else { continue };
+        let s = |k: &str| j.get(k).and_then(|x| x.as_str()).map(String::from);
+        let name = s("name").filter(|n| !n.trim().is_empty());
+        let created = s("created_at").as_deref().and_then(ms_of);
+        out.push(OtherChat {
+            provider: "claudeai",
+            id: s("uuid").unwrap_or_else(|| p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+            title: clip(name.as_deref().unwrap_or_else(|| first.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("Chat")).trim(), 80),
+            cwd: None,
+            created_ms: created,
+            last_ms: s("updated_at").as_deref().and_then(ms_of).or(created).unwrap_or_else(|| mtime(&p)),
+            size: fs::metadata(&p).map(|m| m.len() as i64).unwrap_or(0),
+            path: format!("claudeai:{}", p.to_string_lossy()),
+            model: None,
+        });
+    }
+}
+
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = find_file(&p, name) {
+                return Some(f);
+            }
+        } else if p.file_name().map(|n| n == name).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Takes in a claude.ai export: the .zip itself or the conversations.json inside it. A conversation already imported
+/// is replaced only when the export has a newer version. Returns (new, updated).
+pub fn import_claudeai(path: &Path) -> Result<(usize, usize), String> {
+    let dir = claudeai_dir().ok_or("No backup folder")?;
+    let is_zip = path.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false);
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("chatvault-import-{}-{stamp}", std::process::id()));
+    // ponytail: the whole conversations.json is parsed in memory; a streaming parser would suit multi-GB exports.
+    let json = if is_zip {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = fs::remove_dir_all(&tmp);
+        let ok = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "Expand-Archive -LiteralPath $env:CV_ZIP -DestinationPath $env:CV_OUT -Force"])
+            .env("CV_ZIP", path)
+            .env("CV_OUT", &tmp)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return Err("The zip could not be opened".into());
+        }
+        find_file(&tmp, "conversations.json").ok_or("No conversations.json in that zip. Is it a claude.ai export?")?
+    } else {
+        path.to_path_buf()
+    };
+    let result = (|| {
+        let all: Value = serde_json::from_str(&fs::read_to_string(&json).map_err(|e| e.to_string())?).map_err(|_| "That file is not a claude.ai export".to_string())?;
+        let convs = all.as_array().ok_or("That file is not a claude.ai export")?;
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let (mut added, mut updated) = (0, 0);
+        for c in convs {
+            let Some(id) = c.get("uuid").and_then(|x| x.as_str()).filter(|i| !i.is_empty() && i.len() <= 64 && i.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')) else { continue };
+            if c.get("chat_messages").and_then(|m| m.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
+                continue;
+            }
+            let target = dir.join(format!("{id}.json"));
+            let newer = c.get("updated_at").and_then(|x| x.as_str()).and_then(ms_of);
+            let existed = target.exists();
+            let had = read_json(&target).and_then(|o| o.get("updated_at").and_then(|x| x.as_str()).and_then(ms_of));
+            if existed && !(newer.is_some() && newer > had) {
+                continue;
+            }
+            let part = target.with_extension("json.tmp");
+            fs::write(&part, c.to_string()).map_err(|e| e.to_string())?;
+            fs::rename(&part, &target).map_err(|e| e.to_string())?;
+            if existed { updated += 1 } else { added += 1 }
+        }
+        Ok((added, updated))
+    })();
+    if is_zip {
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    result
+}
+
 // ---------------- shared ----------------
 
 pub fn scan() -> Vec<OtherChat> {
@@ -359,6 +535,7 @@ pub fn scan() -> Vec<OtherChat> {
     scan_gemini(&mut out);
     scan_opencode(&mut out);
     scan_cline(&mut out);
+    scan_claudeai(&mut out);
     out
 }
 
@@ -368,7 +545,7 @@ pub fn fingerprint() -> i64 {
     for p in gemini_files() {
         m = m.max(mtime(&p));
     }
-    for p in cline_sessions() {
+    for p in cline_sessions().into_iter().chain(claudeai_files()) {
         m = m.max(mtime(&p));
     }
     if let Some(db) = opencode_db() {
@@ -390,6 +567,9 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
     if let Some(p) = path.strip_prefix("cline:") {
         return Ok(cline_messages(Path::new(p)));
     }
+    if let Some(p) = path.strip_prefix("claudeai:") {
+        return Ok(claudeai_messages(Path::new(p)));
+    }
     Err("Unknown chat".into())
 }
 
@@ -399,7 +579,7 @@ pub fn is_virtual(path: &str) -> bool {
 
 /// The real file behind a virtual path, for "show file".
 pub fn real_file(path: &str) -> Option<PathBuf> {
-    if let Some(p) = path.strip_prefix("gemini:").or_else(|| path.strip_prefix("cline:")) {
+    if let Some(p) = path.strip_prefix("gemini:").or_else(|| path.strip_prefix("cline:")).or_else(|| path.strip_prefix("claudeai:")) {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
     }
@@ -407,4 +587,53 @@ pub fn real_file(path: &str) -> Option<PathBuf> {
         return opencode_db();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "changes USERPROFILE for the whole process; run alone with --ignored"]
+    fn imports_a_claude_ai_export() {
+        let t = std::env::temp_dir().join("chatvault-claudeai-test");
+        let _ = fs::remove_dir_all(&t);
+        unsafe {
+            std::env::set_var("USERPROFILE", &t);
+            std::env::set_var("LOCALAPPDATA", t.join("Local"));
+        }
+        set_backup_root(&t.join("drive")).unwrap();
+        let export = |updated: &str| {
+            serde_json::json!([
+                {"uuid": "aaaa-1", "name": "Trip plan", "created_at": "2026-01-01T10:00:00Z", "updated_at": updated, "chat_messages": [
+                    {"sender": "human", "created_at": "2026-01-01T10:00:00Z", "text": "", "content": [{"type": "text", "text": "Plan a trip"}],
+                     "attachments": [{"file_name": "notes.txt", "extracted_content": "Ulaanbaatar"}]},
+                    {"sender": "assistant", "created_at": "2026-01-01T10:00:05Z", "text": "", "content": [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "Sure."}]}
+                ]},
+                {"uuid": "bbbb-2", "name": "", "created_at": "2026-01-02T10:00:00Z", "updated_at": "2026-01-02T10:00:00Z", "chat_messages": [
+                    {"sender": "human", "created_at": "2026-01-02T10:00:00Z", "text": "Old style text only"}
+                ]},
+                {"uuid": "cccc-3", "name": "Empty", "created_at": "2026-01-03T10:00:00Z", "updated_at": "2026-01-03T10:00:00Z", "chat_messages": []},
+                {"uuid": "../evil", "name": "Bad id", "chat_messages": [{"sender": "human", "text": "x"}]}
+            ])
+        };
+        let file = t.join("conversations.json");
+        fs::create_dir_all(&t).unwrap();
+        fs::write(&file, export("2026-01-01T11:00:00Z").to_string()).unwrap();
+        assert_eq!(import_claudeai(&file).unwrap(), (2, 0));
+        assert_eq!(import_claudeai(&file).unwrap(), (0, 0), "an unchanged export adds nothing");
+        fs::write(&file, export("2026-01-05T11:00:00Z").to_string()).unwrap();
+        assert_eq!(import_claudeai(&file).unwrap(), (0, 1), "a newer version replaces the old one");
+
+        let mut chats = Vec::new();
+        scan_claudeai(&mut chats);
+        chats.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(chats.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Trip plan", "Old style text only"]);
+        let msgs = read(&chats[0].path).unwrap();
+        let kinds: Vec<_> = msgs.iter().map(|m| (m.role.as_str(), m.kind.as_str())).collect();
+        assert_eq!(kinds, [("user", "text"), ("user", "text"), ("assistant", "reasoning"), ("assistant", "text")]);
+        assert!(msgs[1].text.contains("notes.txt"));
+        assert!(!t.join("drive").join("ChatVault Backup").join("claude-chat").join("..").join("evil.json").exists());
+        let _ = fs::remove_dir_all(&t);
+    }
 }

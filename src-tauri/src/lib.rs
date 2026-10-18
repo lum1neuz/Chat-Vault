@@ -945,7 +945,7 @@ struct ExportDone {
     error: Option<String>,
 }
 
-const EXPORT_TOOLS: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline")];
+const EXPORT_TOOLS: [(&str, &str); 7] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("claudeai", "Claude Chat")];
 
 /// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
 /// exporting again to the same folder replaces the earlier files instead of piling up copies.
@@ -1241,6 +1241,20 @@ async fn sync_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
     tauri::async_runtime::spawn_blocking(move || sync::sync_both(Some(&app))).await.map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+struct Imported {
+    added: usize,
+    updated: usize,
+}
+
+/// Takes in a claude.ai data export (the .zip or its conversations.json) as Claude Chat chats.
+#[tauri::command]
+async fn import_claude_chats(path: String) -> Result<Imported, String> {
+    tauri::async_runtime::spawn_blocking(move || others::import_claudeai(Path::new(&path)).map(|(added, updated)| Imported { added, updated }))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn set_backup_folder(path: String) -> Result<String, String> {
     set_backup_root(Path::new(&path)).map(|p| p.to_string_lossy().to_string())
@@ -1378,6 +1392,7 @@ pub fn run() {
             sync_chats,
             restore_chats,
             set_backup_folder,
+            import_claude_chats,
             backup_status
         ])
         .run(tauri::generate_context!())

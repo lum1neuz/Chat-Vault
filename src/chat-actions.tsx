@@ -20,15 +20,15 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline";
+export type Provider = "claude" | "claudeai" | "codex" | "cursor" | "gemini" | "opencode" | "cline";
 /** What the sidebar lists: one tool, or every tool together. */
 export type Tool = Provider | "all";
-export const PROVIDERS: Provider[] = ["claude", "codex", "cursor", "gemini", "opencode", "cline"];
+export const PROVIDERS: Provider[] = ["claude", "claudeai", "codex", "cursor", "gemini", "opencode", "cline"];
 /** The tools always shown on the overview. The others appear once ChatVault finds their chats. */
-export const CORE_PROVIDERS: Provider[] = ["claude", "codex", "cursor"];
+export const CORE_PROVIDERS: Provider[] = ["claude", "claudeai", "codex", "cursor"];
 /** Tools whose chats cannot be resumed from here: they continue in Claude or Codex through a handoff file. */
 export const isHandoffOnly = (p: Provider) => p !== "claude" && p !== "codex";
-export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline" };
+export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude Code", claudeai: "Claude Chat", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline" };
 
 export type Chat = {
   provider: Provider;
@@ -47,6 +47,8 @@ export type Chat = {
   hasMetadata: boolean;
   backup: boolean;
   userArchived?: boolean;
+  /** The desktop session (local id) this one was started from. */
+  parent?: string | null;
 };
 export type Msg = {
   role: "user" | "assistant";
@@ -71,7 +73,7 @@ export type AccountInfo = {
   plan: string | null;
 };
 
-export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline" };
+export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", claudeai: "Claude Chat", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline" };
 
 export const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });

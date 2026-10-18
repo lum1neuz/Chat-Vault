@@ -37,6 +37,8 @@ pub struct ChatSummary {
     pub backup: bool,
     /// Moved to the archive inside ChatVault. Nothing outside ChatVault changes.
     pub user_archived: bool,
+    /// The desktop session (local id) this one was started from, so it can be shown nested under it.
+    pub parent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -90,6 +92,16 @@ pub fn open_db() -> Result<Connection, String> {
          CREATE VIRTUAL TABLE IF NOT EXISTS chats_fts USING fts5(key UNINDEXED, title, project, preview);",
     )
     .map_err(|e| e.to_string())?;
+    // Added for nesting sessions under the one that started them; rebuild Claude rows once so they get it.
+    // Done under one write lock, so a refresh starting at the same time sees the rows already gone and rebuilds them.
+    let has_parent = c.query_row("SELECT COUNT(*) FROM pragma_table_info('chats') WHERE name='parent'", [], |r| r.get::<_, i64>(0)).unwrap_or(1) > 0;
+    if !has_parent && c.execute_batch("BEGIN IMMEDIATE").is_ok() {
+        if c.execute("ALTER TABLE chats ADD COLUMN parent TEXT", []).is_ok() {
+            let _ = c.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider='claude')", []);
+            let _ = c.execute("DELETE FROM chats WHERE provider='claude'", []);
+        }
+        let _ = c.execute_batch("COMMIT");
+    }
     Ok(c)
 }
 
@@ -153,6 +165,9 @@ struct ClaudeMeta {
     last: Option<i64>,
     archived: bool,
     model: Option<String>,
+    /// The project folder the session belongs to, even when it ran in a worktree.
+    origin_cwd: Option<String>,
+    parent: Option<String>,
 }
 
 fn load_claude_meta() -> HashMap<String, ClaudeMeta> {
@@ -182,6 +197,8 @@ fn load_claude_meta() -> HashMap<String, ClaudeMeta> {
                         last: v.get("lastActivityAt").and_then(|x| x.as_i64()),
                         archived: v.get("isArchived").and_then(|x| x.as_bool()).unwrap_or(false),
                         model: s("model"),
+                        origin_cwd: s("originCwd"),
+                        parent: v.get("spawnedFrom").and_then(|x| x.get("sessionId")).and_then(|x| x.as_str()).map(String::from).or_else(|| s("forkedFromSessionId")),
                     });
                 }
             }
@@ -238,6 +255,10 @@ fn friendly_dir(name: &str) -> String {
 }
 
 fn project_of(cwd: &Option<String>, fallback: &str) -> String {
+    // Sessions started without picking a folder run in a scratch workspace; the Claude app calls these "No folder".
+    if cwd.as_ref().map(|c| c.contains("scratch-workspaces")).unwrap_or(false) {
+        return "No folder".into();
+    }
     cwd.as_ref()
         .and_then(|c| Path::new(c).file_name())
         .map(|n| n.to_string_lossy().to_string())
@@ -299,7 +320,7 @@ fn build_row(
                     local_id: m.local_id.clone(),
                     title,
                     account: m.account.clone(),
-                    project: project_of(&m.cwd, &dir_name),
+                    project: project_of(&m.origin_cwd.clone().or(m.cwd.clone()), &dir_name),
                     cwd: m.cwd.clone(),
                     created_ms: m.created,
                     last_ms: m.last.unwrap_or(mtime),
@@ -310,6 +331,7 @@ fn build_row(
                     has_metadata: true,
                     backup: f.backup,
                     user_archived: false,
+                    parent: None,
                 },
                 mtime,
                 preview: preview.unwrap_or_default(),
@@ -335,6 +357,7 @@ fn build_row(
                 has_metadata: false,
                 backup: f.backup,
                     user_archived: false,
+                    parent: None,
             },
             mtime,
             preview: preview.unwrap_or_default(),
@@ -380,6 +403,7 @@ fn build_row(
             has_metadata: true,
             backup: f.backup,
                     user_archived: false,
+                    parent: None,
         },
         mtime,
         preview: preview.unwrap_or_default(),
@@ -421,8 +445,9 @@ fn upsert(c: &Connection, r: &Row, replace: bool) -> rusqlite::Result<()> {
 pub fn files_fingerprint() -> (usize, i64) {
     let files = collect_files();
     let newest = files.iter().map(|f| mtime_ms(&f.path).1).max().unwrap_or(0);
-    // Gemini CLI, OpenCode and Cline writes count as changes too.
-    (files.len(), newest.max(crate::others::fingerprint()))
+    // Gemini CLI, OpenCode and Cline writes count as changes too, and so do Claude Chat files arriving from the other PC
+    // (Drive may keep their old times, so they are counted).
+    (files.len() + crate::others::claudeai_count(), newest.max(crate::others::fingerprint()))
 }
 
 pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
@@ -523,22 +548,24 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         // Claude titles live in metadata files that change without the transcript changing.
         let tx = c.transaction().map_err(|e| e.to_string())?;
         for (id, m) in &cmeta {
+            let project = m.origin_cwd.as_ref().map(|o| project_of(&Some(o.clone()), "")).filter(|p| !p.is_empty());
             let _ = tx.execute(
-                "UPDATE chats SET title=COALESCE(?1,title), account=?2, last_ms=COALESCE(?3,last_ms), archived=?4, local_id=COALESCE(?5,local_id), has_meta=1 WHERE provider='claude' AND id=?6",
-                params![m.title, m.account, m.last, m.archived as i64, m.local_id, id],
+                "UPDATE chats SET title=COALESCE(?1,title), account=?2, last_ms=COALESCE(?3,last_ms), archived=?4, local_id=COALESCE(?5,local_id), has_meta=1, project=COALESCE(?7,project), parent=?8 WHERE provider='claude' AND id=?6",
+                params![m.title, m.account, m.last, m.archived as i64, m.local_id, id, project, m.parent],
             );
         }
         tx.commit().map_err(|e| e.to_string())?;
                 // Cursor chats are rebuilt only when Cursor's files changed.
         // Gemini CLI, OpenCode and Cline are rebuilt whenever one of their files changed.
         {
-            let ofp = crate::others::fingerprint();
-            let olast: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ('gemini','opencode','cline')", [], |r| r.get(0)).unwrap_or(0);
+            // The count makes Claude Chat files synced in with old times still trigger a rebuild.
+            let ofp = crate::others::fingerprint() + crate::others::claudeai_count() as i64;
+            let olast: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ('gemini','opencode','cline','claudeai')", [], |r| r.get(0)).unwrap_or(0);
             if ofp > 0 && ofp != olast {
                 let chats = crate::others::scan();
                 let tx = c.transaction().map_err(|e| e.to_string())?;
-                let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ('gemini','opencode','cline'))", []);
-                let _ = tx.execute("DELETE FROM chats WHERE provider IN ('gemini','opencode','cline')", []);
+                let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ('gemini','opencode','cline','claudeai'))", []);
+                let _ = tx.execute("DELETE FROM chats WHERE provider IN ('gemini','opencode','cline','claudeai')", []);
                 for ch in chats {
                     let row = Row {
                         s: ChatSummary {
@@ -547,7 +574,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                             local_id: None,
                             title: ch.title.clone(),
                             account: "local".into(),
-                            project: project_of(&ch.cwd, ch.provider),
+                            project: if ch.provider == "claudeai" { "Chats".into() } else { project_of(&ch.cwd, ch.provider) },
                             cwd: ch.cwd,
                             created_ms: ch.created_ms,
                             last_ms: ch.last_ms,
@@ -558,6 +585,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                             has_metadata: true,
                             backup: false,
                             user_archived: false,
+                            parent: None,
                         },
                         mtime: ofp,
                         preview: ch.title,
@@ -594,6 +622,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                         has_metadata: true,
                         backup: false,
                         user_archived: false,
+                        parent: None,
                     },
                     mtime: fp,
                     preview: ch.title,
@@ -640,10 +669,11 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<ChatSummary> {
         has_metadata: r.get::<_, i64>(13)? != 0,
         backup: r.get::<_, i64>(14)? != 0,
         user_archived: r.get::<_, i64>(15)? != 0,
+        parent: r.get(16)?,
     })
 }
 
-const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=chats.provider AND u.id=chats.id)";
+const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=chats.provider AND u.id=chats.id),parent";
 
 pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limit: i64, sort: &str, scope: &str) -> Result<Page, String> {
     let c = open_db()?;
@@ -803,7 +833,7 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
             let mut msgs: Vec<Msg> = Vec::new();
             if provider == "cursor" {
                 msgs = crate::cursor::read(path).unwrap_or_default();
-            } else if matches!(provider.as_str(), "gemini" | "opencode" | "cline") {
+            } else if matches!(provider.as_str(), "gemini" | "opencode" | "cline" | "claudeai") {
                 msgs = crate::others::read(path).unwrap_or_default();
             } else if let Some(lines) = open_lines(Path::new(path)) {
                 for line in lines {

@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import {
+  FileUp,
   Archive,
   Tag,
   ArchiveRestore,
@@ -98,7 +100,7 @@ export default function App() {
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const { pins, names, togglePin, rename } = useChatMeta();
 
-  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null });
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, claudeai: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
   const account = provider === "all" ? "all" : accounts[provider] ?? "all";
   const [query, setQuery] = useState("");
@@ -137,7 +139,8 @@ export default function App() {
   const [syncOpen, setSyncOpen] = useState(false);
   const [renaming, setRenaming] = useState<Chat | null>(null);
   const [deleting, setDeleting] = useState<Chat | null>(null);
-  const [organize, setOrganize] = usePersisted("chatvault.organize", "list");
+  // Grouped by project folder unless you pick one list, like the Claude app. (A new key, so the old "list" default doesn't stick.)
+  const [organize, setOrganize] = usePersisted("chatvault.organize.v2", "project");
   // Expand/collapse-all sets a mode; single clicks are exceptions to it, so projects that load later follow the mode too.
   const [projectsMode, setProjectsMode] = usePersisted<"open" | "closed">("chatvault.projectsMode", "open");
   const [projectExceptions, setProjectExceptions] = usePersisted<string[]>("chatvault.projectExceptions", []);
@@ -146,6 +149,19 @@ export default function App() {
   const projectOpen = useCallback((n: string) => (projectsMode === "open") !== projectExceptions.includes(n), [projectsMode, projectExceptions]);
 
   const say = useCallback((m: string) => void notify(m), []);
+  const importClaudeChats = async () => {
+    const file = await pickFile({ title: "Pick your claude.ai export (.zip or conversations.json)", filters: [{ name: "claude.ai export", extensions: ["zip", "json"] }] }).catch(() => null);
+    if (typeof file !== "string") return;
+    try {
+      const r = await invoke<{ added: number; updated: number }>("import_claude_chats", { path: file });
+      say(`Imported ${r.added.toLocaleString()} new Claude chats${r.updated ? `, updated ${r.updated.toLocaleString()}` : ""}`);
+      setProvider("claudeai");
+      setSelected(null);
+      await rescan();
+    } catch (e) {
+      say(String(e));
+    }
+  };
   // The browser's own right-click menu (Back, Reload, Inspect) makes no sense in an app. Text fields keep their copy and paste menu.
   useEffect(() => {
     if (import.meta.env.DEV) return;
@@ -755,10 +771,11 @@ export default function App() {
         ...tagList.map(([t, n]) => ({ type: "check", label: `${t} (${n})`, icon: <Tag strokeWidth={1.5} />, checked: scope === `tag:${t}`, onSelect: () => setScope(`tag:${t}`) }) as Entry),
       ],
     },
-    { type: "item", label: "Reset", icon: <RotateCcw strokeWidth={1.5} />, disabled: sort === "recent" && scope === "all" && organize === "list", onSelect: () => { setSort("recent"); setScope("all"); setOrganize("list"); } },
+    { type: "item", label: "Reset", icon: <RotateCcw strokeWidth={1.5} />, disabled: sort === "recent" && scope === "all" && organize === "project", onSelect: () => { setSort("recent"); setScope("all"); setOrganize("project"); } },
     { type: "sep" },
     { type: "item", label: "Search all chats", icon: <Search strokeWidth={1.5} />, onSelect: () => openSearch() },
     { type: "item", label: "Sync & backup", icon: <DatabaseBackup strokeWidth={1.5} />, onSelect: () => setSyncOpen(true) },
+    { type: "item", label: "Import Claude chats (claude.ai export)", icon: <FileUp strokeWidth={1.5} />, onSelect: () => void importClaudeChats() },
     { type: "item", label: "Hide the sidebar", icon: <PanelLeft strokeWidth={1.5} />, onSelect: () => setSidebarOpen(false) },
   ];
 
@@ -910,14 +927,26 @@ export default function App() {
                     onReset={() => {
                       setSort("recent");
                       setScope("all");
-                      setOrganize("list");
+                      setOrganize("project");
                     }}
                   />
                   </div>
                 }
               >
                 {(loadingList || !!indexing || (searching && items.length === 0)) && items.length === 0 && <SidebarSkeleton rows={searching ? 5 : 8} />}
-                {!loadingList && !indexing && !searching && !error && recent.length === 0 && (
+                {!loadingList && !indexing && !searching && !error && recent.length === 0 && provider === "claudeai" && !q && scope === "all" && (
+                  <div className="flex flex-col items-center gap-2 p-6 text-center">
+                    <FileUp className="size-8 text-muted-foreground" strokeWidth={1.25} />
+                    <p className="text-sm font-medium">Bring in your Claude chats</p>
+                    <p className="text-xs text-muted-foreground">
+                      Chats from claude.ai and the Chat tab aren't stored on this PC. In claude.ai open Settings, then Privacy, then Export data. When the email arrives, import the zip here.
+                    </p>
+                    <Button size="sm" className="mt-1" onClick={() => void importClaudeChats()}>
+                      <FileUp className="size-4" /> Import export
+                    </Button>
+                  </div>
+                )}
+                {!loadingList && !indexing && !searching && !error && recent.length === 0 && !(provider === "claudeai" && !q && scope === "all") && (
                   <div className="flex flex-col items-center gap-2 p-8 text-center">
                     <Search className="size-8 text-muted-foreground" strokeWidth={1.25} />
                     <p className="text-sm font-medium">No Chats Found</p>
@@ -942,7 +971,17 @@ export default function App() {
                             <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums text-muted-foreground">{list.length}</Badge>
                           </CollapsibleTrigger>
                           <CollapsibleContent className="space-y-0.5" keepMounted={warmProjects.has(project)}>
-                            {(isOpen || warmProjects.has(project)) && list.map((c) => row(c, true))}
+                            {(isOpen || warmProjects.has(project)) &&
+                              nest(list).map(({ c, depth }) =>
+                                depth === 0 ? (
+                                  row(c, true)
+                                ) : (
+                                  <div key={chatKey(c)} className="relative" style={{ paddingLeft: depth * 14 }}>
+                                    <span aria-hidden className="pointer-events-none absolute top-1.5 text-xs text-muted-foreground/60" style={{ left: depth * 14 - 10 }}>└</span>
+                                    {row(c, true)}
+                                  </div>
+                                ),
+                              )}
                           </CollapsibleContent>
                         </Collapsible>
                       );
@@ -1038,7 +1077,9 @@ export default function App() {
           }}
           actions={[
             { id: "overview", label: "Back to Home", icon: <LayoutDashboard className="size-4" />, run: () => setSelected(null) },
-            { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
+            { id: "claude", label: "Show Claude Code chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
+            { id: "claudeai", label: "Show Claude Chat chats", icon: <ProviderLogo provider="claudeai" className="size-4" />, run: () => switchProvider("claudeai") },
+            { id: "import-claudeai", label: "Import Claude chats (claude.ai export)", icon: <FileUp className="size-4" />, run: () => void importClaudeChats() },
             { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => switchProvider("codex") },
             { id: "sync", label: "Sync & backup", icon: <DatabaseBackup className="size-4" />, run: () => setSyncOpen(true) },
             { id: "refresh", label: "Scan this PC for new chats", icon: <RefreshCw className="size-4" />, run: () => void rescan() },
@@ -1098,7 +1139,30 @@ const groupByProject = (list: Chat[]) => {
   return [...map.entries()];
 };
 
-const orderChat = (list: ChatAction[]) => [...list.filter((a) => !a.danger), ...list.filter((a) => a.danger)];
+/** Puts each session right below the one that started it, as the Claude app's sidebar does. */
+const nest = (list: Chat[]) => {
+  const byLocal = new Set(list.map((c) => c.localId).filter(Boolean));
+  const kids = new Map<string, Chat[]>();
+  const roots: Chat[] = [];
+  list.forEach((c) => {
+    if (c.parent && c.parent !== c.localId && byLocal.has(c.parent)) kids.set(c.parent, [...(kids.get(c.parent) ?? []), c]);
+    else roots.push(c);
+  });
+  const out: { c: Chat; depth: number }[] = [];
+  const seen = new Set<Chat>();
+  const add = (c: Chat, depth: number) => {
+    if (seen.has(c)) return;
+    seen.add(c);
+    out.push({ c, depth });
+    (c.localId ? kids.get(c.localId) ?? [] : []).forEach((k) => add(k, Math.min(depth + 1, 3)));
+  };
+  roots.forEach((c) => add(c, 0));
+  // A loop of parents has no root; still show those sessions.
+  list.forEach((c) => add(c, 0));
+  return out;
+};
+
+const orderChat =(list: ChatAction[]) => [...list.filter((a) => !a.danger), ...list.filter((a) => a.danger)];
 
 function Section({ title, count, open, onOpenChange, action, children }: { title: string; count: number; open: boolean; onOpenChange: (o: boolean) => void; action?: ReactNode; children: ReactNode }) {
   return (
@@ -1187,7 +1251,7 @@ function FiltersMenu({ sort, scope, organize, tags, onSort, onScope, onOrganize,
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         <DropdownMenuSeparator />
-        <DropdownMenuItem disabled={applied === 0 && organize === "list"} onClick={onReset}>
+        <DropdownMenuItem disabled={applied === 0 && organize === "project"} onClick={onReset}>
           <RotateCcw className="size-4" strokeWidth={1.5} /> Reset
         </DropdownMenuItem>
       </DropdownMenuContent>

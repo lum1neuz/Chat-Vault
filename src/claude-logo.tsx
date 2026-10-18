@@ -164,7 +164,7 @@ export function ProviderStack({ providers, max = 4, className }: { providers: Pr
 }
 
 export function ProviderLogo({ provider, className }: { provider: Provider; className?: string }) {
-  if (provider === "claude") return <ClaudeLogo className={className} />;
+  if (provider === "claude" || provider === "claudeai") return <ClaudeLogo className={className} />;
   if (provider === "codex") return <CodexLogo className={className} />;
   if (provider === "cursor") return <CursorLogo className={className} />;
   if (provider === "gemini") return <GeminiLogo className={className} />;
