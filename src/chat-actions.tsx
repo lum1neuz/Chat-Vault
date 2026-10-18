@@ -1,23 +1,34 @@
+import { toReaderHtml } from "@/reader-html";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   Bot,
   Copy,
   ExternalLink,
-  FileDown,
+  Save,
+  FileCode,
+  FileJson,
   FileText,
   FolderOpen,
   FolderTree,
   GitFork,
   Hash,
+  Link2,
+  MessageSquareText,
   Sparkles,
   Terminal,
   type LucideIcon,
 } from "lucide-react";
 
-export type Provider = "claude" | "codex" | "cursor";
-export const PROVIDERS: Provider[] = ["claude", "codex", "cursor"];
-export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor" };
+export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline";
+/** What the sidebar lists: one tool, or every tool together. */
+export type Tool = Provider | "all";
+export const PROVIDERS: Provider[] = ["claude", "codex", "cursor", "gemini", "opencode", "cline"];
+/** The tools always shown on the overview. The others appear once ChatVault finds their chats. */
+export const CORE_PROVIDERS: Provider[] = ["claude", "codex", "cursor"];
+/** Tools whose chats cannot be resumed from here: they continue in Claude or Codex through a handoff file. */
+export const isHandoffOnly = (p: Provider) => p !== "claude" && p !== "codex";
+export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline" };
 
 export type Chat = {
   provider: Provider;
@@ -60,10 +71,22 @@ export type AccountInfo = {
   plan: string | null;
 };
 
-export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
+export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline" };
 
 export const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+/** Folder names read better as titles: "seven-jets_main" -> "Seven Jets Main". Names that already mix cases ("ChatVault") are left alone. */
+export const prettyProject = (name: string) => {
+  if (/[a-z][A-Z]/.test(name) || /\s/.test(name)) return name;
+  return name
+    .replace(/[-_.]+/g, " ")
+    .trim()
+    .split(" ")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+};
+/** Chat titles often start in lower case ("fix the login"): capitalize the first letter for display. */
+export const prettyTitle = (t: string) => t.trimStart().replace(/^\p{Ll}/u, (c) => c.toUpperCase());
 export const fmtSize = (b: number) =>
   b > 1073741824
     ? `${(b / 1073741824).toFixed(1)} GB`
@@ -82,10 +105,17 @@ export const setAccountNames = (list: AccountInfo[]) => {
 export const accountLabel = (a: string) =>
   a === "unknown" ? "Unknown account" : a === "local" ? "This computer" : (accountEmails[a] ?? `Account ${a.slice(0, 8)}`);
 
+/** "2026-10-18_05-30": the moment of the export, safe in a file name. */
+const fileStamp = () => {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}`;
+};
+
 /** Asks where to save with the system Save dialog, then writes the file there. Returns false if the user cancels. */
-async function saveWithDialog(name: string, content: string, toast: (m: string) => void) {
-  const safe = name.replace(/[\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "chat";
-  const path = await save({ defaultPath: `${safe}.md`, filters: [{ name: "Markdown", extensions: ["md"] }] });
+async function saveWithDialog(name: string, content: string, toast: (m: string) => void, format: { ext: string; label: string } = { ext: "md", label: "Markdown" }) {
+  const safe = name.replace(/[\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80) || "chat";
+  const path = await save({ defaultPath: `${safe}-${fileStamp()}.${format.ext}`, filters: [{ name: format.label, extensions: [format.ext] }] });
   if (!path) return false;
   await invoke("write_text_file", { path, content });
   toast("Saved");
@@ -112,13 +142,77 @@ export function toMarkdown(chat: Chat, msgs: Msg[]) {
   return lines.join("\n");
 }
 
-const HANDOFF_LIMIT = 200_000;
+const textOf = (msgs: Msg[]) => msgs.filter((m) => m.kind === "text" || m.kind === "summary");
+
+export function toPlainText(chat: Chat, msgs: Msg[]) {
+  const who = PROVIDER_SHORT[chat.provider];
+  const head = [chat.title, "=".repeat(Math.min(chat.title.length, 80)), `${PROVIDER_NAME[chat.provider]} · ${chat.project} · ${fmtDate(chat.lastMs)}`, ""];
+  const body = textOf(msgs).flatMap((m) => [`${m.role === "user" ? "You" : who}${m.ts ? ` (${fmtDate(Date.parse(m.ts))})` : ""}:`, m.text, ""]);
+  return [...head, ...body].join("\n");
+}
+
+export function toJson(chat: Chat, msgs: Msg[]) {
+  const { path: _path, ...meta } = chat;
+  return JSON.stringify({ chat: meta, messages: textOf(msgs).map((m) => ({ role: m.role, time: m.ts, text: m.text })) }, null, 2);
+}
+
+/** A self-contained reading page: opens in any browser, copies the Markdown back, and prints to PDF. */
+export function toHtml(chat: Chat, msgs: Msg[]) {
+  return toReaderHtml(chat.title, [PROVIDER_NAME[chat.provider], prettyProject(chat.project), fmtDate(chat.lastMs), `${textOf(msgs).length} messages`], toMarkdown(chat, msgs));
+}
+
+/** Extra file formats for "Save this chat", next to Markdown. */
+function saveFormatActions(chat: Chat, toast: Toast, allMsgs: () => Promise<Msg[]>): ChatAction[] {
+  const formats: { id: string; label: string; hint: string; icon: LucideIcon; ext: string; name: string; build: (c: Chat, m: Msg[]) => string }[] = [
+    { id: "save-txt", label: "Save as .txt", hint: "Plain text, readable anywhere.", icon: FileText, ext: "txt", name: "Plain text", build: toPlainText },
+    { id: "save-html", label: "Save as .html", hint: "A web page you can open in a browser or print to PDF.", icon: FileCode, ext: "html", name: "Web page", build: toHtml },
+    { id: "save-json", label: "Save as .json", hint: "Structured data: role, time and text of every message.", icon: FileJson, ext: "json", name: "JSON", build: toJson },
+  ];
+  return formats.map((f) => ({
+    id: f.id,
+    label: f.label,
+    hint: f.hint,
+    icon: f.icon,
+    group: "Save" as const,
+    run: async () => {
+      await saveWithDialog(chat.title, f.build(chat, await allMsgs()), toast, { ext: f.ext, label: f.name });
+    },
+  }));
+}
+
+/** Past this many characters a handoff is condensed: it is read in full on every start, so smaller is faster for any AI. */
+const HANDOFF_LIMIT = 60_000;
 
 /** A single file an AI agent can read to pick the work up where the chat stopped. */
-export function buildHandoff(chat: Chat, msgs: Msg[]) {
+export const handoffIsCondensed = (msgs: Msg[]) => msgs.filter((m) => m.kind === "text" || m.kind === "summary").reduce((n, m) => n + m.text.length, 0) > HANDOFF_LIMIT;
+
+/** The user's standing instructions (always..., never..., don't..., make sure...), picked out of their own messages, newest last. */
+export function extractRules(msgs: Msg[], max = 25) {
+  const cue = /\b(always|never|don'?t|do not|dont|make sure|must|should(?:n'?t)?|prefer|remember|instead of|rather than)\b/i;
+  const seen = new Set<string>();
+  const found: string[] = [];
+  for (const m of msgs) {
+    if (m.role !== "user" || m.kind !== "text") continue;
+    for (const raw of m.text.split(/(?<=[.!?])\s+|\n+/)) {
+      const t = raw.replace(/\s+/g, " ").replace(/^[-*>\s"]+/, "").trim();
+      if (t.length < 12 || t.length > 220 || t.endsWith("?") || !cue.test(t)) continue;
+      const key = t.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push(t);
+    }
+  }
+  return found.slice(-max);
+}
+
+/** `fullPath`: the complete conversation as its own file, for a condensed handoff to point at. */
+export function buildHandoff(chat: Chat, msgs: Msg[], fullPath?: string) {
   const text = msgs.filter((m) => m.kind === "text" || m.kind === "summary");
   const line = (m: Msg, max: number) =>
-    `### ${m.role === "user" ? "User" : "Assistant"}${m.kind === "summary" ? " (auto summary of earlier work)" : ""} · ${m.ts ? fmtDate(Date.parse(m.ts)) : ""}\n\n${clip(m.text, max)}\n`;
+    `### ${m.role === "user" ? "User" : "Assistant"}${m.kind === "summary" ? " (auto summary of earlier work)" : ""} · ${m.ts ? fmtDate(Date.parse(m.ts)) : ""}
+
+${clip(m.text, max)}
+`;
 
   const total = text.reduce((n, m) => n + m.text.length, 0);
   let body: string[];
@@ -126,58 +220,182 @@ export function buildHandoff(chat: Chat, msgs: Msg[]) {
   if (total <= HANDOFF_LIMIT) {
     body = text.map((m) => line(m, 8000));
   } else {
-    const head = text.slice(0, 3);
-    const tail = text.slice(-80);
-    const middle = text.slice(3, -80);
-    note =
-      "This chat was long. The first messages and the last 80 messages are complete. The middle part only lists what the user asked, one line each.";
+    const head = text.slice(0, 2);
+    const tail = text.slice(-24);
+    const middle = text.slice(2, -24).filter((m) => m.role === "user").slice(-120);
+    note = "This chat was long, so it is condensed: the first 2 messages and the last 24 are in full, and the middle lists only what the user asked, one line each.";
     body = [
-      ...head.map((m) => line(m, 8000)),
+      ...head.map((m) => line(m, 2500)),
       "### Middle of the conversation (user requests only)\n",
-      ...middle.filter((m) => m.role === "user").map((m) => `- ${clip(m.text.replace(/\s+/g, " "), 300)}`),
+      ...middle.map((m) => `- ${clip(m.text.replace(/\s+/g, " "), 160)}`),
       "",
-      ...tail.map((m) => line(m, 8000)),
+      ...tail.map((m) => line(m, 3500)),
     ];
   }
+
+  // What an AI needs first, so it can act without reading anything else.
+  const lastUser = [...text].reverse().find((m) => m.role === "user");
+  const lastAi = [...text].reverse().find((m) => m.role === "assistant");
+  const stopped = [
+    "## Where we stopped",
+    "",
+    "Last request from the user:",
+    "",
+    lastUser ? clip(lastUser.text, 2000) : "(none)",
+    "",
+    "Last reply from the assistant:",
+    "",
+    lastAi ? clip(lastAi.text, 2000) : "(none)",
+    "",
+  ];
+
+  const rules = extractRules(text);
+  const rulesSection = ["## Rules and preferences (the user's own words)", "", ...(rules.length ? rules.map((r) => `- ${r}`) : ["- None stated."]), ""];
 
   return [
     `# Handoff: ${chat.title}`,
     "",
-    `You are continuing work that was started in a ${PROVIDER_NAME[chat.provider]} chat, possibly under a different account.`,
-    "Read everything below, keep the user's rules and conventions, and carry on from the last request at the bottom.",
-    "Do not redo work that the transcript says is finished. Check the repository state before you change code.",
+    `Work started in a ${PROVIDER_NAME[chat.provider]} chat, possibly under another account. Carry on from "Where we stopped", follow the rules below, and do not redo finished work. Check git status and recent commits before changing code.`,
     "",
     `- Project folder: ${chat.cwd ?? "unknown"}`,
-    `- Original chat id: ${chat.id}`,
+    ...originalFileLines(chat),
     `- Last activity: ${fmtDate(chat.lastMs)}`,
     `- ${note}`,
+    ...(fullPath ? [`- Full conversation, every message, searchable: ${fullPath} (search it for an earlier detail instead of guessing; do not read it whole)`] : []),
     "",
+    ...stopped,
+    ...rulesSection,
     "## Conversation",
     "",
     ...body,
+    "## Your task now",
+    "",
+    "Continue from Where we stopped, following the rules above. First check git status and recent commits, then say in one line where we stopped, then carry on.",
+    "",
   ].join("\n");
 }
 
+/** The chat's own transcript file, only when the original is there. A backup copy, a database-only chat and a compressed file are not worth pointing an AI at: it would hunt for a file it can't use. */
+/** Cursor, Gemini and the other tools keep chats in databases: their "path" is a label like "cursor:...", not a file. */
+const isFilePath = (path: string) => !/^[a-z]{2,}:/i.test(path);
+export const originalPath = (chat: Chat) => (!chat.backup && isFilePath(chat.path) && !/\.(zst|gz|zip)$/i.test(chat.path) ? chat.path : null);
+const originalFileLines = (chat: Chat) => {
+  const o = originalPath(chat);
+  return o ? [`- Original transcript file: ${o} (complete log, large: open it only if the user asks for an exact detail this file lacks)`] : [];
+};
+/** Appended to every prompt that points an AI at a handoff file. */
+const sourceNote = (chat: Chat) => {
+  const o = originalPath(chat);
+  return o ? ` The original log (${fmtSize(chat.size)}, open it only if I ask for an exact detail): ${o}.` : "";
+};
+/**
+ * The one prompt every tool is given, whether ChatVault starts it ("Continue in …"), you copy a start command, or you
+ * copy the prompt itself. It points at the handoff file and, when there is one, the original transcript.
+ */
+export const buildPrompt = (chat: Chat, path: string) => {
+  const title = chat.title.replace(/\s+/g, " ").replace(/["\u201c\u201d]/g, "").trim();
+  const where = chat.cwd ? ` Project folder: ${chat.cwd}.` : "";
+  return (
+    `Read ${path} in full: the handoff of an earlier ${PROVIDER_NAME[chat.provider]} chat (${title}).${where} ` +
+    "Continue from its Where we stopped section, follow its Rules and preferences, and do not redo finished work. " +
+    "Check git status and recent commits first, so you build on what is already done. " +
+    `If it names a full conversation file, search that file for any earlier detail rather than guessing.${sourceNote(chat)} ` +
+    "Begin with one line saying where we stopped."
+  );
+};
+/** Inside a single-quoted PowerShell string a quote is doubled. */
+const psq = (t: string) => t.replace(/'/g, "''");
+/** Moves PowerShell into the chat's folder first. A literal path, so spaces, `$` and quotes in folder names are safe. */
+const cdTo = (chat: Chat) => (chat.cwd ? `Set-Location -LiteralPath '${psq(chat.cwd)}'; ` : "");
+
 export const loadAll = (chat: Chat) => invoke<Msg[]>("read_chat_all", { provider: chat.provider, path: chat.path });
 
+/**
+ * Saves what a new AI reads. A short chat goes in whole. A long one gets a compact briefing plus the complete conversation
+ * as a second, searchable file, so the AI starts fast and can still look up anything that was said.
+ */
 async function prepareHandoff(chat: Chat) {
   const msgs = await loadAll(chat);
-  return invoke<string>("save_handoff", { title: chat.title, content: buildHandoff(chat, msgs) });
+  const fullPath = handoffIsCondensed(msgs) ? await invoke<string>("save_handoff", { title: `full ${chat.title}`, content: toMarkdown(chat, msgs) }) : undefined;
+  return invoke<string>("save_handoff", { title: chat.title, content: buildHandoff(chat, msgs, fullPath) });
 }
 
-const HANDOFF_PROMPT =
-  "It is the transcript of an earlier AI coding session on this project. Continue the work from exactly where it stopped, and follow the project rules it mentions.";
-const codexHandoffCommand = (path: string) => `codex 'Read the file ${path} completely. ${HANDOFF_PROMPT}'`;
-const claudeHandoffCommand = (path: string) => {
-  const folder = path.replace(/[\\/][^\\/]*$/, "");
-  return `claude --add-dir '${folder}' 'Read the file ${path} completely. ${HANDOFF_PROMPT}'`;
+/** The arguments that start a tool on a fresh handoff of this chat. */
+const handoffArgs = async (chat: Chat) => {
+  const handoff = await prepareHandoff(chat);
+  return { handoff, prompt: buildPrompt(chat, handoff) };
 };
+
+const codexHandoffCommand = (path: string, chat: Chat) => `codex '${psq(buildPrompt(chat, path))}'`;
+const claudeHandoffCommand = (path: string, chat: Chat) => {
+  const folder = path.replace(/[\\/][^\\/]*$/, "");
+  // The prompt goes first: --add-dir takes any number of values, so a prompt after it would be read as one more folder and dropped.
+  return `claude '${psq(buildPrompt(chat, path))}' --add-dir '${psq(folder)}'`;
+};
+
+/** "Copy" actions that put chat content on the clipboard, as opposed to the "start this tool" commands. */
+export const COPY_CONTENT_IDS = ["copy-prompt", "copy-md", "copy-path", "copy-id"];
+
+/**
+ * What you reach for when you want another AI to pick a chat up with all its memory: a prompt that points it at the full
+ * transcript, and the transcript's file path.
+ */
+function contextActions(chat: Chat, toast: Toast): ChatAction[] {
+  // The clipboard can refuse a write that comes after a long wait; a hidden text box is the fallback.
+  const copy = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const box = document.createElement("textarea");
+      box.value = text;
+      box.style.position = "fixed";
+      box.style.opacity = "0";
+      document.body.appendChild(box);
+      box.select();
+      const ok = document.execCommand("copy");
+      box.remove();
+      if (!ok) throw new Error("Could not copy to the clipboard");
+    }
+    toast(`${what} copied`);
+  };
+  const out: ChatAction[] = [
+    {
+      id: "copy-prompt",
+      label: "Copy prompt",
+      hint: "Saves the whole chat as a handoff file and copies a prompt you can paste into any AI. It tells the AI to read the file completely and carry on with the same memory.",
+      icon: MessageSquareText,
+      group: "Copy",
+      run: async () => {
+        await copy(buildPrompt(chat, await prepareHandoff(chat)), "Prompt");
+      },
+    },
+    ...(isFilePath(chat.path)
+      ? [
+          {
+            id: "copy-path",
+            label: "Copy file path",
+            hint: "Copies the path of this chat's transcript file.",
+            icon: Link2,
+            group: "Copy" as const,
+            run: () => copy(chat.path, "File path"),
+          },
+        ]
+      : []),
+  ];
+  return out;
+}
+
+/** Every tool this chat can be continued in, its own included. One list for the sidebar menu, the right-click menu and the chat header. */
+export const continueTargets = (actions: ChatAction[]) =>
+  actions.filter((a) => a.id.startsWith("continue-")).map((a) => ({ ...a, logo: a.id.slice("continue-".length) as Provider }));
 
 export type ChatAction = {
   id: string;
   label: string;
   hint: string;
   icon: LucideIcon;
+  /** Show this tool's official logo instead of the icon. */
+  logo?: Provider;
   group: "Chat" | "Continue" | "Open" | "Copy" | "Save";
   /** 1 and 2 are the two buttons shown in the chat header. */
   slot?: 1 | 2;
@@ -187,11 +405,56 @@ export type ChatAction = {
 
 type Toast = (m: string) => void;
 
+/** Where a chat can be continued from. Every tool can take over any chat through a handoff file with the whole conversation. */
+const TOOLS: { id: Provider; name: string; command: (path: string, chat: Chat) => string; icon: LucideIcon }[] = [
+  { id: "claude", name: "Claude", command: (path, chat) => claudeHandoffCommand(path, chat), icon: Sparkles },
+  { id: "codex", name: "Codex", command: (path, chat) => codexHandoffCommand(path, chat), icon: Bot },
+  { id: "gemini", name: "Gemini CLI", command: (path, chat) => `gemini '${psq(buildPrompt(chat, path))}' --include-directories '${psq(path.replace(/[\\/][^\\/]*$/, ""))}'`, icon: Bot },
+  { id: "cursor", name: "Cursor Agent", command: (path, chat) => `cursor-agent '${psq(buildPrompt(chat, path))}'`, icon: Bot },
+  { id: "opencode", name: "OpenCode", command: (path, chat) => `opencode --prompt '${psq(buildPrompt(chat, path))}'`, icon: Bot },
+  { id: "cline", name: "Cline", command: (path, chat) => `cline '${psq(buildPrompt(chat, path))}'`, icon: Bot },
+];
+
+/** "Continue in <tool>" and "Copy <tool> command" for every tool the chat is not already from. */
+function handoffActions(chat: Chat, toast: Toast, skip: Provider[]): ChatAction[] {
+  const cd = cdTo(chat);
+  const out: ChatAction[] = [];
+  TOOLS.filter((t) => t.id !== chat.provider && !skip.includes(t.id)).forEach((t) => {
+    out.push({
+      id: `continue-${t.id}`,
+      label: `Continue in ${t.name}`,
+      hint: `Saves a handoff file with this chat and starts ${t.name} with it, so it keeps the context.`,
+      icon: t.icon,
+      group: "Continue",
+      run: async () => {
+        const handoff = await prepareHandoff(chat);
+        await invoke("launch_agent", { agent: `${t.id}-handoff`, id: chat.id, cwd: chat.cwd, handoff, prompt: buildPrompt(chat, handoff) });
+        toast(`Starting ${t.name} in a terminal`);
+      },
+    });
+    out.push({
+      id: `copy-${t.id}`,
+      label: `Copy ${t.name} command`,
+      hint: `Saves the handoff file and copies the command that starts ${t.name} with it.`,
+      icon: Terminal,
+      group: "Copy",
+      run: async () => {
+        const handoff = await prepareHandoff(chat);
+        await navigator.clipboard.writeText(`${cd}${t.command(handoff, chat)}`);
+        toast("Command copied");
+      },
+    });
+  });
+  return out;
+}
+
+
 export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatAction[] {
-  if (chat.provider === "cursor") return cursorActions(chat, toast, msgs);
+  if (isHandoffOnly(chat.provider)) return cursorActions(chat, toast, msgs);
   const isClaude = chat.provider === "claude";
-  const cd = chat.cwd ? `cd "${chat.cwd}"; ` : "";
-  const allMsgs = async () => (msgs && msgs.length ? msgs : await loadAll(chat));
+  const cd = cdTo(chat);
+  // Always the whole chat from its file: the messages loaded on screen are only the newest page of it.
+  const allMsgs = () => loadAll(chat);
   const copy = async (text: string, what: string) => {
     await navigator.clipboard.writeText(text);
     toast(`${what} copied`);
@@ -203,12 +466,12 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
     ? {
         id: "continue-claude",
         label: "Continue in Claude",
-        hint: "Opens a terminal and resumes this chat with Claude Code, using the account signed in there.",
+        hint: "Starts a new Claude Code session with the whole chat as a handoff file, under the account signed in now. It never reopens the old session, so a used-up limit can't follow it.",
         icon: Sparkles,
         group: "Continue",
         slot: 1,
         run: async () => {
-          await launch("claude");
+          await launch("claude-handoff", await handoffArgs(chat));
           toast("Starting Claude Code in a terminal");
         },
       }
@@ -221,7 +484,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
         slot: 2,
         run: async () => {
           const handoff = await prepareHandoff(chat);
-          await launch("claude-handoff", { handoff });
+          await launch("claude-handoff", { handoff, prompt: buildPrompt(chat, handoff) });
           toast("Starting Claude Code in a terminal");
         },
       };
@@ -235,19 +498,19 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
         slot: 2,
         run: async () => {
           const handoff = await prepareHandoff(chat);
-          await launch("codex-handoff", { handoff });
+          await launch("codex-handoff", { handoff, prompt: buildPrompt(chat, handoff) });
           toast("Starting Codex in a terminal");
         },
       }
     : {
         id: "continue-codex",
         label: "Continue in Codex",
-        hint: "Opens a terminal and resumes this chat with Codex.",
+        hint: "Starts a new Codex session with the whole chat as a handoff file, under the account signed in now. It never reopens the old session.",
         icon: Bot,
         group: "Continue",
         slot: 1,
         run: async () => {
-          await launch("codex-resume");
+          await launch("codex-handoff", await handoffArgs(chat));
           toast("Starting Codex in a terminal");
         },
       };
@@ -308,10 +571,13 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
     {
       id: "copy-native",
       label: isClaude ? "Copy Claude command" : "Copy Codex command",
-      hint: "A PowerShell command that resumes this chat.",
+      hint: "Saves the handoff file and copies the command that starts a new session of this tool with it.",
       icon: Terminal,
       group: "Copy",
-      run: () => copy(`${cd}${isClaude ? "claude --resume" : "codex resume"} ${chat.id}`, "Command"),
+      run: async () => {
+        const handoff = await prepareHandoff(chat);
+        await copy(`${cd}${isClaude ? claudeHandoffCommand(handoff, chat) : codexHandoffCommand(handoff, chat)}`, "Command");
+      },
     },
     {
       id: "copy-other",
@@ -321,7 +587,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       group: "Copy",
       run: async () => {
         const handoff = await prepareHandoff(chat);
-        await copy(`${cd}${isClaude ? codexHandoffCommand(handoff) : claudeHandoffCommand(handoff)}`, "Command");
+        await copy(`${cd}${isClaude ? codexHandoffCommand(handoff, chat) : claudeHandoffCommand(handoff, chat)}`, "Command");
       },
     },
     {
@@ -336,12 +602,13 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       id: "save-md",
       label: "Save as .md",
       hint: "Choose where to save the conversation.",
-      icon: FileDown,
+      icon: Save,
       group: "Save",
       run: async () => {
         await saveWithDialog(chat.title, toMarkdown(chat, await allMsgs()), toast);
       },
     },
+    ...saveFormatActions(chat, toast, allMsgs),
     {
       id: "save-handoff",
       label: "Save handoff file",
@@ -353,20 +620,28 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       },
     },
   );
+  // Continue the same chat in the other tools too: Gemini CLI, Cursor Agent, OpenCode and Cline.
+  const extra = handoffActions(chat, toast, ["claude", "codex"]);
+  const at = list.findIndex((x) => x.id === "fork") + 1;
+  list.splice(at, 0, ...extra.filter((x) => x.group === "Continue"));
+  const copyAt = list.findIndex((x) => x.id === "copy-other") + 1;
+  list.splice(copyAt > 0 ? copyAt : list.length, 0, ...extra.filter((x) => x.group === "Copy"));
+  list.splice(list.findIndex((x) => x.id === "copy-id"), 0, ...contextActions(chat, toast));
   return list;
 }
 
 /** Cursor chats have no command-line resume, so they continue in Claude Code or Codex through a handoff file. */
-function cursorActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatAction[] {
-  const cd = chat.cwd ? `cd "${chat.cwd}"; ` : "";
-  const allMsgs = async () => (msgs && msgs.length ? msgs : await loadAll(chat));
+function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatAction[] {
+  const cd = cdTo(chat);
+  // Always the whole chat from its file: the messages loaded on screen are only the newest page of it.
+  const allMsgs = () => loadAll(chat);
   const copy = async (text: string, what: string) => {
     await navigator.clipboard.writeText(text);
     toast(`${what} copied`);
   };
   const handoffRun = (agent: "claude-handoff" | "codex-handoff", name: string) => async () => {
     const handoff = await prepareHandoff(chat);
-    await invoke("launch_agent", { agent, id: chat.id, cwd: chat.cwd, handoff });
+    await invoke("launch_agent", { agent, id: chat.id, cwd: chat.cwd, handoff, prompt: buildPrompt(chat, handoff) });
     toast(`Starting ${name} in a terminal`);
   };
   const list: ChatAction[] = [
@@ -425,7 +700,7 @@ function cursorActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatActio
       hint: "Saves the handoff file and copies the command that starts Claude Code with it.",
       icon: Terminal,
       group: "Copy",
-      run: async () => copy(`${cd}${claudeHandoffCommand(await prepareHandoff(chat))}`, "Command"),
+      run: async () => copy(`${cd}${claudeHandoffCommand(await prepareHandoff(chat), chat)}`, "Command"),
     },
     {
       id: "copy-codex",
@@ -433,19 +708,20 @@ function cursorActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatActio
       hint: "Saves the handoff file and copies the command that starts Codex with it.",
       icon: Terminal,
       group: "Copy",
-      run: async () => copy(`${cd}${codexHandoffCommand(await prepareHandoff(chat))}`, "Command"),
+      run: async () => copy(`${cd}${codexHandoffCommand(await prepareHandoff(chat), chat)}`, "Command"),
     },
     { id: "copy-md", label: "Copy as Markdown", hint: "Copies the readable conversation.", icon: Copy, group: "Copy", run: async () => copy(toMarkdown(chat, await allMsgs()), "Chat") },
     {
       id: "save-md",
       label: "Save as .md",
       hint: "Choose where to save the conversation.",
-      icon: FileDown,
+      icon: Save,
       group: "Save",
       run: async () => {
         await saveWithDialog(chat.title, toMarkdown(chat, await allMsgs()), toast);
       },
     },
+    ...saveFormatActions(chat, toast, allMsgs),
     {
       id: "save-handoff",
       label: "Save handoff file",
@@ -457,5 +733,11 @@ function cursorActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatActio
       },
     },
   );
+  const others = handoffActions(chat, toast, ["claude", "codex"]);
+  const fork = list.findIndex((x) => x.id === "continue-codex") + 1;
+  list.splice(fork, 0, ...others.filter((x) => x.group === "Continue"));
+  const cc = list.findIndex((x) => x.id === "copy-codex") + 1;
+  list.splice(cc > 0 ? cc : list.length, 0, ...others.filter((x) => x.group === "Copy"));
+  list.splice(list.findIndex((x) => x.id === "copy-id"), 0, ...contextActions(chat, toast));
   return list;
 }

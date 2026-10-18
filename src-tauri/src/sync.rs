@@ -1,4 +1,4 @@
-//! Backs up Claude Code and Codex chats into Documents, and restores them again.
+//! Backs up the chats of Claude Code, Codex, Cursor, Gemini CLI, OpenCode and Cline into Documents, and restores them again.
 //! Restoring never overwrites a file that already exists.
 
 use crate::paths::*;
@@ -55,28 +55,58 @@ fn walk_all(root: &Path, out: &mut Vec<PathBuf>) {
 /// (source, destination) pairs. `forward` = live -> backup, otherwise backup -> live.
 fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
     let Some(b) = backup_root() else { return Vec::new() };
-    let mut maps: Vec<(PathBuf, PathBuf, bool)> = Vec::new(); // (live root, backup root, transcripts only)
+    // (live root, backup root, filter: 0 = everything, 1 = Claude transcripts only, 2 = Cursor transcripts only, 3 = Gemini chats, 4 = OpenCode database)
+    let mut maps: Vec<(PathBuf, PathBuf, u8)> = Vec::new();
     if let Some(p) = claude_projects() {
-        maps.push((p, b.join("claude").join("projects"), true));
+        maps.push((p, b.join("claude").join("projects"), 1));
     }
     if let Some(p) = claude_meta() {
-        maps.push((p, b.join("claude").join("sessions-meta"), false));
+        maps.push((p, b.join("claude").join("sessions-meta"), 0));
     }
     if let Some(c) = codex_home() {
-        maps.push((c.join("sessions"), b.join("codex").join("sessions"), false));
-        maps.push((c.join("archived_sessions"), b.join("codex").join("archived_sessions"), false));
+        maps.push((c.join("sessions"), b.join("codex").join("sessions"), 0));
+        maps.push((c.join("archived_sessions"), b.join("codex").join("archived_sessions"), 0));
+    }
+    // Cursor: the plain-text agent transcripts and the CLI chat stores. The IDE database itself is not copied while Cursor may be writing to it.
+    if let Some(h) = home() {
+        maps.push((h.join(".cursor").join("projects"), b.join("cursor").join("projects"), 2));
+        maps.push((h.join(".cursor").join("chats"), b.join("cursor").join("chats"), 0));
+    }
+    // Gemini CLI (chat files per project) and Cline (one folder per task). OpenCode keeps everything in one SQLite file:
+    // it is copied into the backup but never written back over the live one.
+    if let Some(h) = home() {
+        maps.push((h.join(".gemini").join("tmp"), b.join("gemini").join("tmp"), 3));
+        maps.push((h.join(".cline").join("data").join("sessions"), b.join("cline").join("sessions"), 0));
+        if forward {
+            let db = h.join(".local").join("share").join("opencode");
+            maps.push((db, b.join("opencode"), 4));
+        }
     }
     let mut out = Vec::new();
-    for (live, back, transcripts_only) in maps {
+    for (live, back, filter) in maps {
         let (from, to) = if forward { (&live, &back) } else { (&back, &live) };
         let mut files = Vec::new();
         walk_all(from, &mut files);
         for f in files {
             let Ok(rel) = f.strip_prefix(from) else { continue };
             // Claude project folders also hold sub-agent and tool-result files; keep only transcripts.
-            if transcripts_only
-                && !(rel.components().count() == 2 && f.extension().map(|e| e == "jsonl").unwrap_or(false))
-            {
+            let is_jsonl = f.extension().map(|e| e == "jsonl").unwrap_or(false);
+            if filter == 1 && !(rel.components().count() == 2 && is_jsonl) {
+                continue;
+            }
+            if filter == 2 && !(is_jsonl && rel.to_string_lossy().contains("agent-transcripts")) {
+                continue;
+            }
+            // Gemini: only the saved chats (tmp/<project>/chats/*.json) and the file naming the project.
+            if filter == 3 {
+                let s = rel.to_string_lossy();
+                let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if !((s.contains("chats") && name.ends_with(".json")) || name == ".project_root") {
+                    continue;
+                }
+            }
+            // OpenCode: just its database file.
+            if filter == 4 && f.file_name().map(|n| n != "opencode.db").unwrap_or(true) {
                 continue;
             }
             out.push((f.clone(), to.join(rel)));

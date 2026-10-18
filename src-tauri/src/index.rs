@@ -11,8 +11,10 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::relevant;
 use tauri::{AppHandle, Emitter};
 
+static BODIES_BUSY: AtomicBool = AtomicBool::new(false);
 static REFRESHING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Clone)]
@@ -78,6 +80,9 @@ pub fn open_db() -> Result<Connection, String> {
            mtime INTEGER NOT NULL, path TEXT NOT NULL, model TEXT, has_meta INTEGER NOT NULL DEFAULT 0,
            backup INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(provider, id));
          CREATE TABLE IF NOT EXISTS user_archive(provider TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(provider, id));
+         CREATE TABLE IF NOT EXISTS chat_tags(provider TEXT NOT NULL, id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(provider, id, tag));
+         CREATE VIRTUAL TABLE IF NOT EXISTS chat_bodies USING fts5(key UNINDEXED, body, tokenize='unicode61 remove_diacritics 2');
+         CREATE TABLE IF NOT EXISTS body_state(key TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS backed_up(provider TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(provider, id));
          CREATE INDEX IF NOT EXISTS chats_last ON chats(provider, last_ms DESC);
          CREATE INDEX IF NOT EXISTS chats_acct ON chats(provider, account, last_ms DESC);
@@ -416,7 +421,8 @@ fn upsert(c: &Connection, r: &Row, replace: bool) -> rusqlite::Result<()> {
 pub fn files_fingerprint() -> (usize, i64) {
     let files = collect_files();
     let newest = files.iter().map(|f| mtime_ms(&f.path).1).max().unwrap_or(0);
-    (files.len(), newest)
+    // Gemini CLI, OpenCode and Cline writes count as changes too.
+    (files.len(), newest.max(crate::others::fingerprint()))
 }
 
 pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
@@ -461,6 +467,30 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                 let id = if f.provider == "codex" && stem.len() >= 36 { stem[stem.len() - 36..].to_string() } else { stem };
                 let _ = tx.execute("INSERT OR IGNORE INTO backed_up(provider,id) VALUES(?1,?2)", params![f.provider, id]);
             }
+            // Cursor chats copied into the backup folder: transcripts (named by chat id) and CLI stores (folder named by chat id).
+            if let Some(root) = backup_root().map(|b| b.join("cursor")) {
+                fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+                    let Ok(rd) = fs::read_dir(dir) else { return };
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.is_dir() { walk(&p, out) } else { out.push(p) }
+                    }
+                }
+                let mut found = Vec::new();
+                walk(&root, &mut found);
+                for p in found {
+                    let id = if p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                        p.file_stem().map(|n| n.to_string_lossy().to_string())
+                    } else if p.file_name().map(|n| n == "store.db").unwrap_or(false) {
+                        p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string())
+                    } else {
+                        None
+                    };
+                    if let Some(id) = id {
+                        let _ = tx.execute("INSERT OR IGNORE INTO backed_up(provider,id) VALUES('cursor',?1)", params![id]);
+                    }
+                }
+            }
             tx.commit().map_err(|e| e.to_string())?;
         }
 
@@ -500,6 +530,44 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         }
         tx.commit().map_err(|e| e.to_string())?;
                 // Cursor chats are rebuilt only when Cursor's files changed.
+        // Gemini CLI, OpenCode and Cline are rebuilt whenever one of their files changed.
+        {
+            let ofp = crate::others::fingerprint();
+            let olast: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ('gemini','opencode','cline')", [], |r| r.get(0)).unwrap_or(0);
+            if ofp > 0 && ofp != olast {
+                let chats = crate::others::scan();
+                let tx = c.transaction().map_err(|e| e.to_string())?;
+                let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ('gemini','opencode','cline'))", []);
+                let _ = tx.execute("DELETE FROM chats WHERE provider IN ('gemini','opencode','cline')", []);
+                for ch in chats {
+                    let row = Row {
+                        s: ChatSummary {
+                            provider: ch.provider.into(),
+                            id: ch.id,
+                            local_id: None,
+                            title: ch.title.clone(),
+                            account: "local".into(),
+                            project: project_of(&ch.cwd, ch.provider),
+                            cwd: ch.cwd,
+                            created_ms: ch.created_ms,
+                            last_ms: ch.last_ms,
+                            archived: false,
+                            size: ch.size,
+                            path: ch.path,
+                            model: ch.model,
+                            has_metadata: true,
+                            backup: false,
+                            user_archived: false,
+                        },
+                        mtime: ofp,
+                        preview: ch.title,
+                    };
+                    let _ = upsert(&tx, &row, true);
+                }
+                tx.commit().map_err(|e| e.to_string())?;
+            }
+        }
+
         let fp = crate::cursor::fingerprint();
         let last: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider='cursor'", [], |r| r.get(0)).unwrap_or(0);
         if fp > 0 && fp != last {
@@ -582,11 +650,17 @@ pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limi
     let acct = account.filter(|a| a != "all");
     let like = format!("%{}%", q.trim().replace('%', "").replace('_', ""));
     let fts = fts_expr(q);
+    let mut tag_sql = String::new();
     let scope_sql = match scope {
         "live" => " AND backup=0 AND NOT (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))",
         // Every chat that has a copy in the backup folder, whether or not the original still exists.
         "backup" => " AND (backup=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM backed_up))",
         "archived" => " AND (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))",
+        t if t.starts_with("tag:") => {
+            let tag: String = t[4..].chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').collect();
+            tag_sql = format!(" AND (provider||':'||id) IN (SELECT provider||':'||id FROM chat_tags WHERE tag='{}')", tag.replace('\'', ""));
+            tag_sql.as_str()
+        }
         // The normal lists leave out chats you archived in ChatVault.
         _ => " AND (provider||':'||id) NOT IN (SELECT provider||':'||id FROM user_archive)",
     };
@@ -596,7 +670,7 @@ pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limi
         "size" => "size DESC",
         _ => "last_ms DESC",
     };
-    let where_sql = format!("provider=?1 AND (?2 IS NULL OR account=?2) AND (?3 = '' OR title LIKE ?4 OR project LIKE ?4 OR (provider||':'||id) IN (SELECT key FROM chats_fts WHERE chats_fts MATCH ?5)){scope_sql}");
+    let where_sql = format!("(?1='all' OR provider=?1) AND (?2 IS NULL OR account=?2) AND (?3 = '' OR title LIKE ?4 OR project LIKE ?4 OR (provider||':'||id) IN (SELECT key FROM chats_fts WHERE chats_fts MATCH ?5)){scope_sql}");
     let fts_param = fts.unwrap_or_else(|| "\"\"".into());
     let trimmed = q.trim().to_string();
     let total: i64 = c
@@ -673,6 +747,134 @@ pub fn set_archived(provider: &str, id: &str, archived: bool) -> Result<(), Stri
     Ok(())
 }
 
+/// Your own labels for a chat, kept in ChatVault only.
+pub fn set_tags(provider: &str, id: &str, tags: &[String]) -> Result<(), String> {
+    let c = open_db()?;
+    c.execute("DELETE FROM chat_tags WHERE provider=?1 AND id=?2", params![provider, id]).map_err(|e| e.to_string())?;
+    for t in tags {
+        let clean: String = t.chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').collect::<String>().trim().chars().take(30).collect();
+        if !clean.is_empty() {
+            c.execute("INSERT OR IGNORE INTO chat_tags(provider,id,tag) VALUES(?1,?2,?3)", params![provider, id, clean]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub fn tags_of(provider: &str, id: &str) -> Result<Vec<String>, String> {
+    let c = open_db()?;
+    let mut st = c.prepare("SELECT tag FROM chat_tags WHERE provider=?1 AND id=?2 ORDER BY tag").map_err(|e| e.to_string())?;
+    let v = st.query_map(params![provider, id], |r| r.get(0)).map_err(|e| e.to_string())?.flatten().collect();
+    Ok(v)
+}
+
+/// Every tag with how many chats of this tool carry it.
+pub fn all_tags(provider: &str) -> Result<Vec<(String, i64)>, String> {
+    let c = open_db()?;
+    let mut st = c.prepare("SELECT tag, COUNT(*) FROM chat_tags WHERE provider=?1 GROUP BY tag ORDER BY tag").map_err(|e| e.to_string())?;
+    let v = st.query_map(params![provider], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?.flatten().collect();
+    Ok(v)
+}
+
+/// Reads the words of every changed chat into a full-text index, so searching inside chats is instant.
+/// It runs after a scan, a little at a time, and only touches chats that are new or changed.
+pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
+    if BODIES_BUSY.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let result = (|| {
+        let c = open_db()?;
+        let todo: Vec<(String, String, String, i64, i64)> = {
+            let mut st = c
+                .prepare(
+                    "SELECT c.provider, c.id, c.path, c.size, c.mtime FROM chats c
+                     LEFT JOIN body_state b ON b.key = c.provider||':'||c.id
+                     WHERE b.key IS NULL OR b.size != c.size OR b.mtime != c.mtime
+                     ORDER BY c.last_ms DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+        let total = todo.len();
+        let mut tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
+        for (i, (provider, id, path, size, mtime)) in todo.iter().enumerate() {
+            let key = format!("{provider}:{id}");
+            let mut body = String::new();
+            let mut msgs: Vec<Msg> = Vec::new();
+            if provider == "cursor" {
+                msgs = crate::cursor::read(path).unwrap_or_default();
+            } else if matches!(provider.as_str(), "gemini" | "opencode" | "cline") {
+                msgs = crate::others::read(path).unwrap_or_default();
+            } else if let Some(lines) = open_lines(Path::new(path)) {
+                for line in lines {
+                    if !relevant(provider, &line) {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                        msgs.extend(messages_for(provider, &v));
+                    }
+                }
+            }
+            for m in msgs.iter().filter(|m| matches!(m.kind.as_str(), "text" | "summary")) {
+                if body.len() > 400_000 {
+                    break;
+                }
+                body.push_str(m.text.trim());
+                body.push('\n');
+            }
+            let _ = tx.execute("DELETE FROM chat_bodies WHERE key=?1", params![key]);
+            if !body.is_empty() {
+                let _ = tx.execute("INSERT INTO chat_bodies(key, body) VALUES(?1, ?2)", params![key, body]);
+            }
+            let _ = tx.execute("INSERT OR REPLACE INTO body_state(key,size,mtime) VALUES(?1,?2,?3)", params![key, size, mtime]);
+            if (i + 1) % 40 == 0 {
+                tx.commit().map_err(|e| e.to_string())?;
+                tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
+                if let Some(a) = app {
+                    let _ = a.emit("search-index-progress", (i + 1, total));
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        // chats that no longer exist
+        let _ = c.execute("DELETE FROM chat_bodies WHERE key NOT IN (SELECT provider||':'||id FROM chats)", []);
+        let _ = c.execute("DELETE FROM body_state WHERE key NOT IN (SELECT provider||':'||id FROM chats)", []);
+        if let Some(a) = app {
+            let _ = a.emit("search-index-progress", (total, total));
+        }
+        Ok(())
+    })();
+    BODIES_BUSY.store(false, Ordering::SeqCst);
+    result
+}
+
+/// (chats with their text indexed, all chats): lets the page say when search is still catching up.
+pub fn body_status() -> Result<(i64, i64), String> {
+    let c = open_db()?;
+    let indexed: i64 = c.query_row("SELECT COUNT(*) FROM body_state", [], |r| r.get(0)).unwrap_or(0);
+    let total: i64 = c.query_row("SELECT COUNT(*) FROM chats", [], |r| r.get(0)).unwrap_or(0);
+    Ok((indexed, total))
+}
+
+/// Instant search inside the text of every chat of one tool. Returns the chat id and a short snippet around the match.
+pub fn search_bodies(provider: &str, q: &str, limit: i64) -> Result<Vec<(String, String)>, String> {
+    let Some(expr) = fts_expr(q) else { return Ok(Vec::new()) };
+    let c = open_db()?;
+    let mut st = c
+        .prepare(
+            "SELECT substr(key, length(?1)+2), snippet(chat_bodies, 1, '', '', '…', 24)
+             FROM chat_bodies WHERE chat_bodies MATCH ?2 AND key LIKE ?1||':%'
+             ORDER BY rank LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    let v = st
+        .query_map(params![provider, expr, limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(v)
+}
+
 pub fn forget(path: &str) -> Result<(), String> {
     let c = open_db()?;
     c.execute(
@@ -709,6 +911,8 @@ pub struct Stats {
     pub projects: Vec<ProjectStat>,
     pub size_claude: i64,
     pub size_codex: i64,
+    /// Bytes per tool, for every tool that has chats.
+    pub sizes: std::collections::HashMap<String, i64>,
 }
 
 /// Activity for the overview page: chats per day, busiest projects and disk use.
@@ -739,7 +943,13 @@ pub fn stats(days: i64) -> Result<Stats, String> {
     let size = |p: &str| -> i64 {
         c.query_row("SELECT COALESCE(SUM(size),0) FROM chats WHERE provider=?1", params![p], |r| r.get(0)).unwrap_or(0)
     };
-    Ok(Stats { daily, projects, size_claude: size("claude"), size_codex: size("codex") })
+    let mut sizes = std::collections::HashMap::new();
+    if let Ok(mut st) = c.prepare("SELECT provider, COALESCE(SUM(size),0) FROM chats GROUP BY provider") {
+        if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+            sizes.extend(rows.flatten());
+        }
+    }
+    Ok(Stats { daily, projects, size_claude: size("claude"), size_codex: size("codex"), sizes })
 }
 
 fn chrono_now_ms() -> i64 {

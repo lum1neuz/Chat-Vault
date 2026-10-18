@@ -1,8 +1,17 @@
+import { FileViewContext, FileViewer, isFilePath } from "@/file-viewer";
 import { ChatImage, GalleryContext, Lightbox } from "@/image-viewer";
 import { animateScroll } from "react-scroll";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
+  ExternalLink,
+  Save,
+  Settings,
+  LayoutDashboard,
+  RefreshCw,
+  ArrowRightLeft,
+  ArrowUp,
+  FolderOpen,
   Archive,
   ArchiveRestore,
   ArrowDown,
@@ -35,7 +44,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { copyImage, downloadImage } from "@/image-viewer";
+import { ContextArea, type Entry } from "@/context-area";
 import { Toggle } from "@/components/ui/toggle";
+import { ActionIcon } from "@/action-icon";
+import { runAction } from "@/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Trace, TraceCollapsible, TraceCollapsibleContent, TraceCollapsibleTrigger, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
 import {
@@ -53,7 +67,7 @@ import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
 import { MessageBody } from "@/message-body";
 import { Highlight, textHas } from "@/highlight";
-import { PROVIDER_SHORT, chatActions, fmtDate, fmtSize, type Chat, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { PROVIDER_SHORT, chatActions, continueTargets, COPY_CONTENT_IDS, isHandoffOnly, fmtDate, fmtSize, prettyTitle, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { HeaderSkeleton, MessagesSkeleton } from "@/skeletons";
 import { PlanBlock, StepItem, SubagentBlock, isAgent, isPlan, mergeResults, stepName, type Item } from "@/steps";
 
@@ -75,6 +89,10 @@ type Props = {
   onArchive?: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onRefresh?: () => void;
+  onOverview?: () => void;
+  /** Open the all-chats search with this word already typed. */
+  onSearchAll?: (q: string) => void;
   toast: (m: string) => void;
 };
 
@@ -100,6 +118,25 @@ export function ChatView(p: Props) {
   const [activeTick, setActiveTick] = useState(0);
   const [loadingAll, setLoadingAll] = useState(false);
   const [viewer, setViewer] = useState<number | null>(null);
+  const [fileOpen, setFileOpen] = useState<string | null>(null);
+  // Full paths the chat itself mentions. A short path like src/app.tsx is looked up under the folders they point into,
+  // so it still opens when the chat worked on a project other than its own folder.
+  const fileHints = useMemo(() => {
+    if (!fileOpen || !page) return [];
+    const seen = new Set<string>();
+    for (const m of page.messages) {
+      const data = typeof m.data === "string" ? m.data : m.data ? JSON.stringify(m.data) : "";
+      // JSON doubles every backslash in a path; undo that before looking for drive paths.
+      const text = `${m.text}\n${data}`.split("\\\\").join("\\");
+      for (const hit of text.match(/[A-Za-z]:\\[^\s"'`<>|*?]+/g) ?? []) {
+        seen.add(hit.replace(/[.,;:)\]]+$/, ""));
+        if (seen.size >= 300) return [...seen];
+      }
+    }
+    return [...seen];
+  }, [fileOpen, page]);
+  const fileCtx = useMemo(() => ({ base: chat.cwd ?? null, open: (path: string) => setFileOpen(path) }), [chat.cwd]);
+  useEffect(() => setFileOpen(null), [chat.id]);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -441,8 +478,116 @@ export function ChatView(p: Props) {
     }
   }, [barTicks, goTo]);
 
+  /**
+   * Right-click menu of the chat window. The first block depends on what was clicked (selected words, a link, a picture, a file
+   * name, a message); below it come the things people do with a chat: pick it up again, move it, copy it, save it.
+   */
+  const menuEntries = (target: HTMLElement): Entry[] => {
+    // Windows opened above the chat (picture viewer, file viewer) have their own controls.
+    if (target.closest('[role="dialog"], [data-lightbox], [data-slot="dialog-content"]')) return [];
+    const out: Entry[] = [];
+    const say = (text: string, what: string) => async () => {
+      await navigator.clipboard.writeText(text);
+      p.toast(`${what} copied`);
+    };
+    const selection = window.getSelection()?.toString().trim() ?? "";
+    const link = target.closest("a")?.getAttribute("href");
+    const img = target.closest("img");
+    const at = target.closest<HTMLElement>("[data-index]");
+    const block = at ? blocks[Number(at.dataset.index)] : undefined;
+    const said = block && block.kind === "msg" ? (block as { m?: Msg }).m : undefined;
+    const codeText = target.closest("code")?.textContent?.trim() ?? "";
+    const word = selection && selection.length <= 80 && !selection.includes("\n") ? selection : "";
+
+    // What was clicked
+    if (img?.src) {
+      out.push(
+        { type: "item", label: "Copy image", icon: <Copy strokeWidth={1.5} />, onSelect: () => copyImage(img.src) },
+        { type: "item", label: "Save image", icon: <Save strokeWidth={1.5} />, onSelect: () => downloadImage(img.src, 1) },
+      );
+    }
+    if (link) {
+      out.push(
+        { type: "item", label: "Open link in the browser", icon: <ExternalLink strokeWidth={1.5} />, onSelect: () => void openUrl(link).catch(() => {}) },
+        { type: "item", label: "Copy link address", icon: <Copy strokeWidth={1.5} />, onSelect: say(link, "Link") },
+      );
+    }
+    const path = word || codeText;
+    if (path && isFilePath(path)) out.push({ type: "item", label: "Open this file", icon: <FileText strokeWidth={1.5} />, onSelect: () => setFileOpen(path) });
+    if (selection) out.push({ type: "item", label: "Copy selection", icon: <Copy strokeWidth={1.5} />, onSelect: say(selection, "Selection") });
+    if (word && p.onSearchAll) out.push({ type: "item", label: `Search all chats for “${word.length > 24 ? `${word.slice(0, 24)}…` : word}”`, icon: <Search strokeWidth={1.5} />, onSelect: () => p.onSearchAll?.(word) });
+    if (said?.text && !selection) out.push({ type: "item", label: said.role === "user" ? "Copy your message" : "Copy this reply", icon: <Copy strokeWidth={1.5} />, onSelect: say(said.text, "Message") });
+    if (out.length) out.push({ type: "sep" });
+
+    // The same order as the "…" menu on a sidebar card.
+    const acts = chatActions(chat, p.toast, page?.messages ?? null);
+    const asEntry = (a: ChatAction, label?: string): Entry => {
+      return { type: "item", label: label ?? a.label, icon: <ActionIcon action={a} className="size-4" />, onSelect: () => runAction(a.label, a.run) };
+    };
+    const short = (a: ChatAction) => a.label.replace(/^Continue in /, "").replace(/^Copy /, "").replace(/ command$/, "");
+    const find = (id: string) => acts.find((a) => a.id === id);
+    const others = continueTargets(acts);
+
+    // Around the conversation
+    out.push(
+      { type: "item", label: "Search in this chat", icon: <Search strokeWidth={1.5} />, onSelect: () => setSearchOpen(true) },
+      { type: "item", label: p.showSteps ? "Hide the AI's steps" : "Show the AI's steps", icon: <ListTree strokeWidth={1.5} />, onSelect: p.onToggleSteps },
+    );
+    const el = viewport();
+    out.push({
+      type: "sub",
+      label: "Go to",
+      icon: <ArrowDown strokeWidth={1.5} />,
+      entries: [
+        { type: "item", label: "First message", icon: <ArrowUp strokeWidth={1.5} />, onSelect: () => el?.scrollTo({ top: 0 }) },
+        { type: "item", label: "Latest message", icon: <ArrowDown strokeWidth={1.5} />, onSelect: () => jumpNow(el?.scrollHeight ?? 0) },
+        ...(p.onOverview ? ([{ type: "sep" }, { type: "item", label: "Back to Home", icon: <LayoutDashboard strokeWidth={1.5} />, onSelect: p.onOverview }] as Entry[]) : []),
+      ],
+    });
+    out.push({ type: "sep" });
+
+    // Continue it, copy it for an AI, save it
+    if (others.length) out.push({ type: "sub", label: "Continue this chat in", icon: <ArrowRightLeft strokeWidth={1.5} />, entries: others.map((a) => asEntry(a, short(a))) });
+    for (const id of ["copy-prompt", "copy-path"]) {
+      const a = find(id);
+      if (a) out.push(asEntry(a));
+    }
+    const moreCopies = ["copy-md", "copy-id", "fork"].map(find).filter((a): a is ChatAction => !!a);
+    const commands = acts.filter((a) => a.group === "Copy" && a.id.startsWith("copy-") && !COPY_CONTENT_IDS.includes(a.id));
+    const copyLabel: Record<string, string> = { "copy-md": "Conversation as Markdown", "copy-id": "Chat ID" };
+    out.push({
+      type: "sub",
+      label: "More copy options",
+      icon: <Copy strokeWidth={1.5} />,
+      entries: [
+        ...moreCopies.map((a) => asEntry(a, copyLabel[a.id])),
+        ...(commands.length ? ([{ type: "sep" }, { type: "label", label: "Copy the command to start" }, ...commands.map((a) => asEntry(a, short(a)))] as Entry[]) : []),
+      ],
+    });
+    const saves = acts.filter((a) => a.group === "Save");
+    if (saves.length) out.push({ type: "sub", label: "Save as", icon: <Save strokeWidth={1.5} />, entries: saves.map((a) => asEntry(a)) });
+    out.push({ type: "sep" });
+
+    // Keep it tidy
+    out.push(
+      { type: "item", label: "Rename", icon: <Pencil strokeWidth={1.5} />, onSelect: p.onRename },
+      { type: "item", label: p.pinned ? "Unpin" : "Pin to top", icon: p.pinned ? <PinOff strokeWidth={1.5} /> : <Pin strokeWidth={1.5} />, onSelect: p.onTogglePin },
+    );
+    if (p.onArchive) out.push({ type: "item", label: chat.userArchived ? "Unarchive" : "Archive", icon: chat.userArchived ? <ArchiveRestore strokeWidth={1.5} /> : <Archive strokeWidth={1.5} />, onSelect: p.onArchive });
+    out.push({ type: "sep" });
+
+    // Elsewhere
+    const open = acts.filter((a) => a.group === "Open");
+    if (open.length) out.push({ type: "sub", label: "Open", icon: <FolderOpen strokeWidth={1.5} />, entries: open.map((a) => asEntry(a)) });
+    if (p.onRefresh) out.push({ type: "item", label: "Refresh", icon: <RefreshCw strokeWidth={1.5} />, onSelect: p.onRefresh });
+    if (!isHandoffOnly(chat.provider)) out.push({ type: "sep" }, { type: "item", label: "Delete chat", icon: <Trash2 strokeWidth={1.5} />, danger: true, onSelect: p.onDelete });
+    return out;
+  };
+
   return (
     <GalleryContext.Provider value={gallery}>
+    <FileViewContext.Provider value={fileCtx}>
+    <ContextArea className="flex min-h-0 flex-1 flex-col" entries={menuEntries} onError={(e) => p.toast(String(e))}>
     <div className="flex min-h-0 flex-1 flex-col">
       {viewer !== null && <Lightbox images={images} index={Math.min(viewer, images.length - 1)} onIndex={setViewer} onClose={() => setViewer(null)} />}
       {!page ? (
@@ -456,7 +601,7 @@ export function ChatView(p: Props) {
             </div>
             <div className="min-w-0 flex-1">
               <div className="group/title flex items-center gap-1">
-                <h2 className="truncate text-base font-medium leading-tight">{chat.title}</h2>
+                <h2 className="truncate text-[13px] font-medium leading-tight">{prettyTitle(chat.title)}</h2>
                 {p.live && (
                   <Tip label={`${PROVIDER_SHORT[chat.provider]} is working in this chat right now`}>
                     <span className="relative ml-1 flex size-2 shrink-0">
@@ -489,7 +634,7 @@ export function ChatView(p: Props) {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              <Tip label={p.pinned ? "Unpin this chat" : "Pin this chat to the top of the list"}>
+              <Tip label={p.pinned ? "Unpin" : "Pin"}>
                 <Toggle aria-label="Pin" size="sm" pressed={p.pinned} onPressedChange={p.onTogglePin}>
                   {p.pinned ? <PinOff /> : <Pin />}
                 </Toggle>
@@ -514,6 +659,8 @@ export function ChatView(p: Props) {
               </Tip>
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <ExportMenu kind="copy" chat={chat} msgs={page.messages} toast={p.toast} />
+              <ExportMenu kind="save" chat={chat} msgs={page.messages} toast={p.toast} />
               <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} onArchive={p.onArchive} />
             </div>
           </div>
@@ -648,19 +795,87 @@ export function ChatView(p: Props) {
         )}
       </div>
     </div>
+      <FileViewer path={fileOpen} base={chat.cwd ?? null} hints={fileHints} onClose={() => setFileOpen(null)} />
+    </ContextArea>
+    </FileViewContext.Provider>
     </GalleryContext.Provider>
   );
 }
 
-function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin, onArchive }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void; onArchive?: () => void }) {
-  const actions = chatActions(chat, toast, msgs);
-  const groups = ["Continue", "Open", "Copy", "Save"] as const;
+
+/** Copying and saving the conversation itself: as Markdown, with its ID, as a file. Kept apart from the AI hand-off and the chat actions. */
+function ExportMenu({ kind, chat, msgs, toast }: { kind: "copy" | "save"; chat: Chat; msgs: Msg[]; toast: (m: string) => void }) {
+  const all = chatActions(chat, toast, msgs);
+  const isCommand = (a: ChatAction) => a.group === "Copy" && a.id.startsWith("copy-") && !COPY_CONTENT_IDS.includes(a.id);
+  const sections = (
+    kind === "copy"
+      ? [
+          { title: "Copy this chat", items: [...all.filter((a) => a.group === "Copy" && !isCommand(a)), ...all.filter((a) => a.id === "fork")] },
+          { title: "Copy the command to start", items: all.filter(isCommand) },
+        ]
+      : [{ title: "Save this chat", items: all.filter((a) => a.group === "Save") }]
+  ).filter((x) => x.items.length);
+  if (!sections.length) return null;
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger render={<Button size="sm" />}>
-        Actions <ChevronDown className="size-3.5 opacity-70" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-60">
+      <Tooltip>
+        <TooltipTrigger render={<DropdownMenuTrigger render={<Button size="icon-sm" variant="outline" aria-label={kind === "copy" ? "Copy" : "Save"} />} />}>
+          {kind === "copy" ? <Copy className="size-4" strokeWidth={1.5} /> : <Save className="size-4" strokeWidth={1.5} />}
+        </TooltipTrigger>
+        <TooltipContent>{kind === "copy" ? "Copy" : "Save"}</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" className="w-56">
+        {sections.map((sec, i) => (
+          <div key={sec.title}>
+            {i > 0 && <DropdownMenuSeparator />}
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>{sec.title}</DropdownMenuLabel>
+              {sec.items.map((a) => {
+                const Icon = a.icon;
+                return (
+                  <DropdownMenuItem key={a.id} onClick={() => void runAction(a.label, a.run)}>
+                    <Icon className="size-4" strokeWidth={1.5} /> {sec.title.startsWith("Copy the command") ? a.label.replace(/^Copy /, "").replace(/ command$/, "") : a.label}
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuGroup>
+          </div>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** One primary button for everything you do with the chat itself: continue it in a tool, keep it tidy, find its files, delete it. */
+function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin, onArchive }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void; onArchive?: () => void }) {
+  const all = chatActions(chat, toast, msgs);
+  const tools = continueTargets(all);
+  const open = all.filter((a) => a.group === "Open");
+  const row = (a: ChatAction, label?: string) => {
+    return (
+      <DropdownMenuItem key={a.id} onClick={() => void runAction(a.label, a.run)}>
+        <ActionIcon action={a} className="size-4" /> {label ?? a.label}
+      </DropdownMenuItem>
+    );
+  };
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger render={<DropdownMenuTrigger render={<Button size="sm" aria-label="Chat actions" />} />}>
+          <Settings className="size-4" strokeWidth={1.5} /> Actions <ChevronDown className="size-3.5 opacity-70" />
+        </TooltipTrigger>
+        <TooltipContent>Actions</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" className="w-60">
+        {tools.length > 0 && (
+          <>
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Continue this chat in</DropdownMenuLabel>
+              {tools.map((a) => row(a, a.label.replace(/^Continue in /, "")))}
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+          </>
+        )}
         <DropdownMenuGroup>
           <DropdownMenuLabel>Chat</DropdownMenuLabel>
           <DropdownMenuItem onClick={onRename}>
@@ -675,27 +890,16 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
             </DropdownMenuItem>
           )}
         </DropdownMenuGroup>
-        {groups.map((g) => {
-          const items = actions.filter((a) => a.group === g);
-          if (!items.length) return null;
-          return (
-            <div key={g}>
-              <DropdownMenuSeparator />
-              <DropdownMenuGroup>
-                <DropdownMenuLabel>{g}</DropdownMenuLabel>
-                {items.map((a) => {
-                  const Icon = a.icon;
-                  return (
-                    <DropdownMenuItem key={a.id} onClick={() => a.run().catch((e) => toast(String(e)))}>
-                      <Icon className="size-4" strokeWidth={1.5} /> {a.label}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuGroup>
-            </div>
-          );
-        })}
-        {chat.provider !== "cursor" && (
+        {open.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Open</DropdownMenuLabel>
+              {open.map((a) => row(a))}
+            </DropdownMenuGroup>
+          </>
+        )}
+        {!isHandoffOnly(chat.provider) && (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onClick={onDelete}>

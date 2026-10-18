@@ -1,4 +1,6 @@
 import { useId } from "react";
+import { cn } from "@/lib/utils";
+import { Avatar, AvatarFallback, AvatarGroup, AvatarGroupCount } from "@/components/ui/avatar";
 import type { Provider } from "@/chat-actions";
 
 /** Claude-style spark mark, drawn as rotated rounded rays. */
@@ -78,8 +80,103 @@ export function AppLogo({ className }: { className?: string }) {
   );
 }
 
+
+const GEMINI_FRAME = "M419.776 0.00781248C470.82 0.654592 512 42.2332 512 93.4296V418.572L511.992 419.776C511.344 470.82 469.768 512 418.572 512H93.4296C41.83 512 0.00052574 470.168 0 418.572V93.4296C0.000523248 42.2332 41.1792 0.654596 92.2228 0.00781248L93.4296 0H418.572L419.776 0.00781248ZM93.4296 29.8984C58.3424 29.899 29.899 58.3424 29.8984 93.4296V418.572C29.899 453.656 58.3424 482.1 93.4296 482.1H418.572C453.656 482.1 482.1 453.656 482.1 418.572V93.4296C482.1 58.3424 453.656 29.899 418.572 29.8984H93.4296ZM357.926 223.129V301.274L154.754 398.949V342.297L321.199 262.199L154.754 182.106V125.453L357.926 223.129Z";
+
+/** The Gemini CLI icon: a dark rounded tile with a gradient frame and a prompt arrow. */
+export function GeminiLogo({ className }: { className?: string }) {
+  const id = useId().replace(/:/g, "");
+  return (
+    <svg viewBox="0 0 512 512" className={className} fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id={`${id}a`} x1="119.591" y1="257.869" x2="393.343" y2="257.869" gradientUnits="userSpaceOnUse">
+          <stop offset="0.0196292" stopColor="#406AFB" />
+          <stop offset="0.226827" stopColor="#078EFB" />
+          <stop offset="0.418757" stopColor="#939AFF" />
+          <stop offset="0.584515" stopColor="#D698FC" />
+          <stop offset="0.774264" stopColor="#FA6178" />
+          <stop offset="0.97928" stopColor="#F2554F" />
+        </linearGradient>
+        <linearGradient id={`${id}b`} x1="0" y1="257.869" x2="512" y2="257.869" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#217BFE" />
+          <stop offset="0.335283" stopColor="#078EFB" />
+          <stop offset="0.7" stopColor="#AC87EB" />
+          <stop offset="1" stopColor="#EE4D5D" />
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="93.4" fill="#1E1E2E" />
+      <path d={GEMINI_FRAME} fill={`url(#${id}a)`} />
+      <path d={GEMINI_FRAME} fill={`url(#${id}b)`} />
+    </svg>
+  );
+}
+
+/** The OpenCode mark in its two official colourings: the dark one on light themes, the light one on dark themes. */
+export function OpenCodeLogo({ className }: { className?: string }) {
+  const inner = "M180 240H60V120H180V240Z";
+  const frame = "M180 60H60V240H180V60ZM240 300H0V0H240V300Z";
+  return (
+    <>
+      <svg viewBox="0 0 240 300" className={cn("dark:hidden", className)} fill="none" aria-hidden="true">
+        <path d={inner} fill="#CFCECD" />
+        <path d={frame} fill="#211E1E" />
+      </svg>
+      <svg viewBox="0 0 240 300" className={cn("hidden dark:block", className)} fill="none" aria-hidden="true">
+        <path d={inner} fill="#4B4646" />
+        <path d={frame} fill="#F1ECEC" />
+      </svg>
+    </>
+  );
+}
+
+const CLINE_BOT = "M56 6.39844C62.0667 6.39844 66.4004 10.8825 66.4004 16.4609C66.4003 18.0033 66.0624 20.0605 65.5117 22.3984H83.0117C88.4176 22.3984 92.7997 26.7807 92.7998 32.1865V45.8643L105.068 58.6445C105.365 58.9541 105.366 59.4434 105.068 59.7529L92.7998 72.5312V86.21C92.7998 91.6159 88.4176 95.998 83.0117 95.998H28.9883C23.5824 95.998 19.2002 91.6158 19.2002 86.21V72.5312L6.93164 59.7529C6.63461 59.4434 6.63474 58.9541 6.93164 58.6445L19.2002 45.8643V32.1865C19.2003 26.7807 23.5825 22.3985 28.9883 22.3984H46.4883C45.9376 20.0605 45.5997 18.0033 45.5996 16.4609C45.5996 10.8826 49.9334 6.39851 56 6.39844ZM40.9092 44.7988C38.0376 44.799 35.7102 47.1265 35.71 49.998V68.3984C35.71 71.2702 38.0375 73.5984 40.9092 73.5986C43.7811 73.5986 46.1094 71.2703 46.1094 68.3984V49.998C46.1092 47.1263 43.7809 44.7988 40.9092 44.7988ZM70.5098 44.7988C67.638 44.7988 65.3098 47.1263 65.3096 49.998V68.3984C65.3096 71.2703 67.6379 73.5986 70.5098 73.5986C73.3816 73.5985 75.71 71.2703 75.71 68.3984V49.998C75.7097 47.1264 73.3814 44.7989 70.5098 44.7988Z";
+
+/** The Cline bot mark: dark on light themes, white on dark themes (the two official colourings). */
+export function ClineLogo({ className }: { className?: string }) {
+  return (
+    <>
+      <svg viewBox="0 0 112 112" className={cn("dark:hidden", className)} fill="none" aria-hidden="true">
+        <path d={CLINE_BOT} fill="#1C1C24" />
+      </svg>
+      <svg viewBox="0 0 112 112" className={cn("hidden dark:block", className)} fill="none" aria-hidden="true">
+        <path d={CLINE_BOT} fill="#FFFFFF" />
+      </svg>
+    </>
+  );
+}
+
+/** The logos of several tools overlapping each other as a shadcn avatar group. Used for "all tools". */
+export function ProviderStack({ providers, max = 4, className }: { providers: Provider[]; max?: number; className?: string }) {
+  const shown = providers.slice(0, max);
+  const rest = providers.length - shown.length;
+  return (
+    <AvatarGroup className={cn("-space-x-1.5 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-background dark:*:data-[slot=avatar]:ring-[color-mix(in_oklab,var(--input)_30%,var(--background))]", className)} aria-hidden>
+      {shown.map((p) => (
+        <Avatar key={p} size="sm" className="size-6 after:hidden">
+          <AvatarFallback className="bg-muted p-[5px] dark:bg-neutral-800">
+            <ProviderLogo provider={p} className="size-full" />
+          </AvatarFallback>
+        </Avatar>
+      ))}
+      {rest > 0 && <AvatarGroupCount className="size-6 bg-muted text-[10px] font-medium ring-2 ring-background dark:bg-neutral-800 dark:ring-[color-mix(in_oklab,var(--input)_30%,var(--background))]">+{rest}</AvatarGroupCount>}
+    </AvatarGroup>
+  );
+}
+
 export function ProviderLogo({ provider, className }: { provider: Provider; className?: string }) {
   if (provider === "claude") return <ClaudeLogo className={className} />;
   if (provider === "codex") return <CodexLogo className={className} />;
-  return <CursorLogo className={className} />;
+  if (provider === "cursor") return <CursorLogo className={className} />;
+  if (provider === "gemini") return <GeminiLogo className={className} />;
+  if (provider === "opencode") return <OpenCodeLogo className={className} />;
+  return <ClineLogo className={className} />;
+}
+
+/** The GitHub mark. */
+export function GithubIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden>
+      <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.03 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
+    </svg>
+  );
 }

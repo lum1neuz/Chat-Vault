@@ -5,8 +5,9 @@ function ScrollArea({
   className,
   children,
   horizontal = false,
+  viewportClassName,
   ...props
-}: ScrollAreaPrimitive.Root.Props & { horizontal?: boolean }) {
+}: ScrollAreaPrimitive.Root.Props & { horizontal?: boolean; viewportClassName?: string }) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
@@ -15,7 +16,7 @@ function ScrollArea({
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0"
+        className={cn("size-full rounded-[inherit] outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0", viewportClassName)}
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

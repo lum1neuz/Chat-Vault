@@ -22,7 +22,7 @@
       html, body { margin: 0; height: 100%; }
       #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; font-family: "Geist Variable", sans-serif; font-weight: 400; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; background: #0a0a0a; color: #a1a1aa; }
       .light #boot, html:not(.dark) #boot { background: #ffffff; color: #71717a; }
-      #boot svg { width: 64px; height: 64px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.35), 0 0 0 1px rgba(128,128,128,.25); animation: bootpulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+      #boot svg { width: 64px; height: 64px; border-radius: 16px; animation: bootpulse 2s cubic-bezier(.4,0,.6,1) infinite; }
       #boot p { margin: 0; font-size: 14px; line-height: 20px; font-weight: 400; }
       @keyframes bootpulse { 50% { opacity: .5; } }
     </style>

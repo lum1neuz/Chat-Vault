@@ -3,6 +3,7 @@ import { Bot, Brain, CircleCheck, CircleDashed, Circle, Globe, ListTodo, Termina
 import { Badge } from "@/components/ui/badge";
 import { CodeBlock, CodeBlockContent } from "@/components/ui/code-block";
 import { Trace, TraceCollapsible, TraceCollapsibleContent, TraceCollapsibleTrigger, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
+import { isFilePath, useFileView } from "@/file-viewer";
 import { Highlight, textHas } from "@/highlight";
 import { hostname, uniqueUrls } from "@/ai-elements";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -122,7 +123,10 @@ export function SubagentBlock({ item }: { item: Item }) {
 /** One tool step inside an expanded group. */
 export function StepItem({ item, q }: { item: Item; q: string }) {
   const [open, setOpen] = useState(false);
+  const files = useFileView();
   const [name, detail] = splitText(item.text);
+  const d0 = data(item);
+  const filePath = [d0.file_path, d0.filePath, d0.path, d0.absolute_path, d0.target_file].map(str).find((x) => x && isFilePath(x)) ?? (isFilePath(detail) ? detail : "");
 
   if (item.kind === "reasoning") {
     return (
@@ -229,10 +233,16 @@ export function StepItem({ item, q }: { item: Item; q: string }) {
         <TraceTitle className="font-medium text-foreground/80">
           <Highlight text={name} q={q} activeMark={false} />
         </TraceTitle>
-        {detail && (
-          <TraceDescription className="truncate font-mono text-xs">
-            <Highlight text={detail} q={q} activeMark={false} />
-          </TraceDescription>
+        {filePath ? (
+          <button type="button" onClick={() => files.open(filePath)} className="min-w-0 cursor-pointer truncate text-left font-mono text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground">
+            <Highlight text={filePath} q={q} activeMark={false} />
+          </button>
+        ) : (
+          detail && (
+            <TraceDescription className="truncate font-mono text-xs">
+              <Highlight text={detail} q={q} activeMark={false} />
+            </TraceDescription>
+          )
         )}
       </TraceLine>
     </Trace>

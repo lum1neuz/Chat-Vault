@@ -1,7 +1,9 @@
+import { notifyError } from "@/toast";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DatabaseBackup, FolderOpen, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
+import { DatabaseBackup, FileDown, FolderOpen, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
@@ -59,7 +61,22 @@ export function SyncDialog({
       load();
       onChanged();
     } catch (e) {
-      toast(String(e));
+      notifyError(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const exportAll = async () => {
+    const folder = await pickFolder({ directory: true, title: "Choose a folder for the Markdown files" });
+    if (!folder || typeof folder !== "string") return;
+    setBusy("sync");
+    try {
+      const r = await invoke<{ written: number; skipped: number; folder: string }>("export_all_markdown", { folder, provider: null });
+      toast(`Exported ${r.written.toLocaleString()} chats as Markdown`);
+      void invoke("reveal_in_folder", { path: r.folder }).catch(() => {});
+    } catch (e) {
+      notifyError(e);
     } finally {
       setBusy(null);
     }
@@ -119,6 +136,10 @@ export function SyncDialog({
             </Button>
           </div>
 
+          <Button variant="outline" className="w-full" disabled={!!busy} onClick={() => void exportAll()}>
+            <FileDown className="size-4" /> Export all chats as Markdown
+          </Button>
+
           <div className="flex items-center gap-3 rounded-lg border p-3">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
               <RefreshCw className="size-4 text-muted-foreground" strokeWidth={1.5} />
@@ -137,8 +158,8 @@ export function SyncDialog({
           </div>
 
           <p className="text-xs leading-relaxed text-muted-foreground">
-            ChatVault also reads the backup folder, so your chats stay visible after you sign out or reinstall Claude or Codex.
-            &quot;Restore missing&quot; copies back only the chats that are gone, so Claude and Codex can list them again. Nothing is ever
+            ChatVault also reads the backup folder, so your chats stay visible after you sign out or reinstall your AI tools.
+            &quot;Restore missing&quot; copies back only the chats that are gone, so Claude and Codex can list them again (Gemini CLI and Cline too). Nothing is ever
             overwritten or deleted.
           </p>
         </div>

@@ -1,4 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { notify, notifyError } from "@/toast";
 import { Check, ChevronLeft, ChevronRight, Copy, Download, Maximize2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -13,13 +16,18 @@ const ext = (src: string) => {
   return t === "jpeg" ? "jpg" : t.replace("svg+xml", "svg");
 };
 
-export function downloadImage(src: string, n: number) {
-  const a = document.createElement("a");
-  a.href = src;
-  a.download = `chatvault-image-${n}.${ext(src)}`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+/** Opens the system Save dialog and writes the picture where the user chooses. */
+export async function downloadImage(src: string, n: number) {
+  const type = ext(src);
+  try {
+    const path = await save({ defaultPath: `chatvault-image-${n}.${type}`, filters: [{ name: "Image", extensions: [type] }] });
+    if (!path) return;
+    const bytes = new Uint8Array(await (await fetch(src)).arrayBuffer());
+    await invoke("write_image_file", { path, bytes: Array.from(bytes) });
+    notify("Image saved");
+  } catch (e) {
+    notifyError(e);
+  }
 }
 
 /** Copies the picture itself (as PNG), so it can be pasted into other apps. */

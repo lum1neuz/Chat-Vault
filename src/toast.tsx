@@ -2,9 +2,35 @@ import hot, { Toaster } from "react-hot-toast";
 
 /** One place for every message ChatVault shows. Errors and confirmations get their own icon, the rest stay plain. */
 export function notify(message: string) {
-  if (/^error|could not|cannot|can't|failed|not found|denied|unable/i.test(message)) return hot.error(message);
-  if (/copied|saved|synced|restored|forked|ready|done|removed|added/i.test(message)) return hot.success(message);
+  if (/^error|could not|couldn't|cannot|can't|can only|failed|not found|no longer|denied|unable|too large|not available|not opened|unknown|only (?:files|picture)|no project folder|binary|is a folder/i.test(message)) return hot.error(message);
+  if (/copied|saved|synced|restored|forked|ready|done|removed|added|exported|starting|started|moved|opened|pinned|unpinned|archived|renamed|updated|deleted/i.test(message)) return hot.success(message);
   return hot(message);
+}
+
+/** An error from a thrown value: the text without the "Error:" prefix, always shown as an error toast. */
+export function notifyError(e: unknown) {
+  return hot.error(String(e).replace(/^Error:\s*/, ""));
+}
+
+/**
+ * Runs a chat action the way every menu should: the menu is already closed, a loading toast appears if the work takes
+ * a moment (long chats take a while to read), the action reports its own success, and a failure becomes an error toast.
+ */
+export async function runAction(label: string, work: () => Promise<unknown> | unknown) {
+  let id: string | undefined;
+  const timer = setTimeout(() => {
+    id = hot.loading(`${label}…`);
+  }, 250);
+  try {
+    await work();
+  } catch (e) {
+    clearTimeout(timer);
+    if (id) hot.dismiss(id);
+    notifyError(e);
+    return;
+  }
+  clearTimeout(timer);
+  if (id) hot.dismiss(id);
 }
 
 export function AppToaster() {

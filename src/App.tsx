@@ -3,8 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
+  Tag,
   ArchiveRestore,
+  ArrowRightLeft,
+  Copy,
   ChevronRight,
+  Layers,
   DatabaseBackup,
   Eye,
   FolderOpen,
@@ -23,6 +27,7 @@ import {
   Pin,
   PinOff,
   RefreshCw,
+  Save,
   Search,
   Sun,
   Users,
@@ -35,12 +40,16 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AppToaster, notify } from "@/toast";
+import { AppToaster, notify, notifyError, runAction } from "@/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { AppLogo, ProviderLogo } from "@/claude-logo";
-import { PROVIDERS, PROVIDER_NAME, PROVIDER_SHORT, accountLabel, chatActions, fmtDate, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import type { LucideIcon } from "lucide-react";
+import { ContextArea, type Entry } from "@/context-area";
+import { AppLogo, ProviderLogo, ProviderStack } from "@/claude-logo";
+import { Badge } from "@/components/ui/badge";
+import { ActionIcon } from "@/action-icon";
+import { ChatCard } from "@/chat-card";
+import { CORE_PROVIDERS, PROVIDERS, type Tool, PROVIDER_NAME, isHandoffOnly, accountLabel, chatActions, continueTargets, COPY_CONTENT_IDS, prettyProject, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { ChatView } from "@/chat-view";
 import { FadedScroll } from "@/faded-scroll";
 import { OverviewPage } from "@/overview";
@@ -59,6 +68,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { SidebarSkeleton } from "@/skeletons";
 import { Splash } from "@/splash";
+import { GlobalSearch } from "@/global-search";
+import { TagsDialog } from "@/tags-dialog";
 import { TitleBar } from "@/titlebar";
 import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
 import { chatKey, useChatMeta, usePersisted } from "@/store";
@@ -74,7 +85,7 @@ type IndexProg = { phase: string; done: number; total: number };
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function App() {
-  const [provider, setProvider] = usePersisted<Provider>("chatvault.provider", "claude");
+  const [provider, setProvider] = usePersisted<Tool>("chatvault.provider", "claude");
   const [accounts, setAccounts] = usePersisted<Record<string, string>>("chatvault.accounts", {});
   const [showSteps, setShowSteps] = usePersisted("chatvault.steps", true);
   const [sort, setSort] = usePersisted("chatvault.sort", "recent");
@@ -87,19 +98,32 @@ export default function App() {
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const { pins, names, togglePin, rename } = useChatMeta();
 
-  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null });
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
-  const account = accounts[provider] ?? "all";
+  const account = provider === "all" ? "all" : accounts[provider] ?? "all";
   const [query, setQuery] = useState("");
   const [q, setQ] = useState("");
   const [items, setItems] = useState<Chat[]>([]);
   const [pinned, setPinned] = useState<Chat[]>([]);
   const [total, setTotal] = useState(0);
   const [loadingList, setLoadingList] = useState(true);
+  const [searchAll, setSearchAll] = useState(false);
+  const [searchSeed, setSearchSeed] = useState("");
+  /** Opens the search page, optionally with a word already typed. */
+  const openSearch = useCallback((q = "") => {
+    setSearchSeed(q);
+    setSearchAll(true);
+  }, []);
+  const [tagging, setTagging] = useState<Chat | null>(null);
+  const [tagList, setTagList] = useState<[string, number][]>([]);
   // The start screen stays for at least a moment, then fades once the first list is in.
   const [splash, setSplash] = useState<"on" | "leaving" | "off">("on");
   const bootAt = useRef(Date.now());
   const [error, setError] = useState<string | null>(null);
+  // A failed scan or query used to disappear silently; it now shows as an error toast.
+  useEffect(() => {
+    if (error) notifyError(error);
+  }, [error]);
   const [hits, setHits] = useState<Record<string, string> | null>(null);
   const [searching, setSearching] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -114,9 +138,24 @@ export default function App() {
   // Expand/collapse-all sets a mode; single clicks are exceptions to it, so projects that load later follow the mode too.
   const [projectsMode, setProjectsMode] = usePersisted<"open" | "closed">("chatvault.projectsMode", "open");
   const [projectExceptions, setProjectExceptions] = usePersisted<string[]>("chatvault.projectExceptions", []);
+  // Collapsed projects render no chats; hovering one warms it up so it opens instantly.
+  const [warmProjects, setWarmProjects] = useState<Set<string>>(new Set());
   const projectOpen = useCallback((n: string) => (projectsMode === "open") !== projectExceptions.includes(n), [projectsMode, projectExceptions]);
 
   const say = useCallback((m: string) => void notify(m), []);
+  // The browser's own right-click menu (Back, Reload, Inspect) makes no sense in an app. Text fields keep their copy and paste menu.
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    const block = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) e.preventDefault();
+    };
+    document.addEventListener("contextmenu", block);
+    return () => document.removeEventListener("contextmenu", block);
+  }, []);
+  // A failed list load is reported as a toast, not as text inside the sidebar.
+  useEffect(() => {
+    if (error) notifyError(error);
+  }, [error]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -153,6 +192,8 @@ export default function App() {
     } finally {
       setIndexing(null);
       setReloadKey((k) => k + 1);
+      // The words inside chats are indexed quietly in the background so searching is instant.
+      void invoke("build_search_index").catch(() => {});
     }
   }, []);
 
@@ -191,17 +232,25 @@ export default function App() {
   // Pinned chats of the current tool.
   useEffect(() => {
     if (!isTauri) return;
-    const ids = pins.filter((k) => k.startsWith(`${provider}:`)).map((k) => k.slice(provider.length + 1));
-    if (!ids.length) {
+    const byTool = new Map<string, string[]>();
+    for (const k of pins) {
+      const at = k.indexOf(":");
+      const p = k.slice(0, at);
+      if (provider === "all" || p === provider) byTool.set(p, [...(byTool.get(p) ?? []), k.slice(at + 1)]);
+    }
+    if (!byTool.size) {
       setPinned([]);
       return;
     }
-    invoke<Chat[]>("chats_by_ids", { provider, ids }).then(setPinned).catch(() => {});
+    Promise.all([...byTool].map(([p, ids]) => invoke<Chat[]>("chats_by_ids", { provider: p, ids }).catch(() => [] as Chat[])))
+      .then((lists) => setPinned(lists.flat().sort((a, b) => b.lastMs - a.lastMs)))
+      .catch(() => {});
   }, [pins, provider, reloadKey]);
 
   // First page of the list whenever the tool, account, search or index changes.
+  const searchingAll = q.length >= 2;
   useEffect(() => {
-    if (!isTauri) return;
+    if (!isTauri || searchingAll) return;
     let stale = false;
     setLoadingList(true);
     setHits(null);
@@ -217,7 +266,53 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [provider, account, q, sort, scope, reloadKey]);
+  }, [provider, account, q, sort, scope, reloadKey, searchingAll]);
+
+  // Searching looks in every tool at once: matching titles and projects, plus the words inside the chats (instant, from the search index).
+  useEffect(() => {
+    if (!isTauri || !searchingAll) return;
+    let stale = false;
+    setSearching(true);
+    void (async () => {
+      try {
+        const per = await Promise.all(
+          PROVIDERS.map(async (p) => {
+            const [titles, words] = await Promise.all([
+              invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q, offset: 0, limit: 30, sort: "recent", scope: "all" }).then((r) => r.items).catch(() => [] as Chat[]),
+              invoke<Hit[]>("deep_search", { provider: p, query: q }).catch(() => [] as Hit[]),
+            ]);
+            const inside = words.length ? await invoke<Chat[]>("chats_by_ids", { provider: p, ids: words.slice(0, 40).map((h) => h.id) }).catch(() => [] as Chat[]) : [];
+            return { titles, inside, words };
+          }),
+        );
+        if (stale) return;
+        const snippets: Record<string, string> = {};
+        const seen = new Set<string>();
+        const list: Chat[] = [];
+        per.forEach(({ titles, inside, words }) => {
+          words.forEach((h) => (snippets[h.id] = h.snippet));
+          [...titles, ...inside].forEach((c) => {
+            const k = chatKey(c);
+            if (!seen.has(k)) {
+              seen.add(k);
+              list.push(c);
+            }
+          });
+        });
+        list.sort((x, y) => y.lastMs - x.lastMs);
+        setItems(list);
+        setTotal(list.length);
+        setHits(snippets);
+        setError(null);
+        setLoadingList(false);
+      } finally {
+        if (!stale) setSearching(false);
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [q, searchingAll, reloadKey]);
 
   useEffect(() => {
     if (splash !== "on" || (isTauri && (loadingList || indexing))) return;
@@ -230,7 +325,7 @@ export default function App() {
 
   const loadingMore = useRef(false);
   const loadMore = useCallback(async () => {
-    if (loadingMore.current || hits) return;
+    if (loadingMore.current || hits || searchingAll) return;
     loadingMore.current = true;
     try {
       const r = await invoke<{ items: Chat[]; total: number }>("query_chats", { provider, account, q, offset: items.length, limit: PAGE_SIZE, sort, scope });
@@ -239,7 +334,7 @@ export default function App() {
     } finally {
       loadingMore.current = false;
     }
-  }, [provider, account, q, sort, scope, items.length, hits]);
+  }, [provider, account, q, sort, scope, items.length, hits, searchingAll]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const hasMore = !hits && items.length < total;
@@ -262,27 +357,12 @@ export default function App() {
     };
   }, [hasMore, loadMore, items.length, recentOpen]);
 
-  const runDeepSearch = async () => {
-    if (query.trim().length < 2) return;
-    setSearching(true);
-    try {
-      const res = await invoke<Hit[]>("deep_search", { provider, query });
-      const found = await invoke<Chat[]>("chats_by_ids", { provider, ids: res.map((h) => h.id) });
-      setHits(Object.fromEntries(res.map((h) => [h.id, h.snippet])));
-      setItems(found);
-      setTotal(found.length);
-    } catch (e) {
-      say(String(e));
-    } finally {
-      setSearching(false);
-    }
-  };
-
   const openId = useRef(0);
   const [outline, setOutline] = useState<{ ts: string; text: string }[] | null>(null);
   const open = useCallback(
     (chat: Chat) => {
       const id = ++openId.current;
+      setSearchAll(false);
       setSelected(chat);
       setPage(null);
       setOutline(null);
@@ -346,7 +426,7 @@ export default function App() {
       busy = true;
       try {
         const seen = new Map<string, Chat>();
-        listed.current.forEach((c) => c.provider !== "cursor" && seen.set(chatKey(c), c));
+        listed.current.forEach((c) => !isHandoffOnly(c.provider) && seen.set(chatKey(c), c));
         const chats = [...seen.values()];
         const ms = await invoke<number[]>("chat_stamps", { items: chats.map((c) => [c.provider, c.path]) });
         const now = Date.now();
@@ -397,6 +477,7 @@ export default function App() {
         if (cursorMoved || fresh || grew) {
           lastRefresh.current = Date.now();
           await invoke("refresh_index");
+          void invoke("build_search_index").catch(() => {});
           await quietReload();
           const sel = selRef.current;
           const cur = pageRef.current;
@@ -425,7 +506,7 @@ export default function App() {
     stamp.current = "";
     setLive(false);
     const sel = selected;
-    if (!sel || sel.provider === "cursor") return;
+    if (!sel || isHandoffOnly(sel.provider)) return;
     let busy = false;
     const id = window.setInterval(async () => {
       const cur = pageRef.current;
@@ -448,7 +529,7 @@ export default function App() {
         // Fast path: only the end of the file is read, and what is new is whatever follows the last message already shown.
         const sig = (m: Msg) => `${m.ts}|${m.role}|${m.kind}|${m.text.slice(0, 80)}`;
         const lastShown = cur.messages[cur.messages.length - 1];
-        if (lastShown && sel.provider !== "cursor") {
+        if (lastShown && !isHandoffOnly(sel.provider)) {
           try {
             const tail = await invoke<Msg[]>("read_chat_tail", { provider: sel.provider, path: sel.path, limit: 60 });
             const at = tail.map(sig).lastIndexOf(sig(lastShown));
@@ -544,7 +625,7 @@ export default function App() {
     }
   };
 
-  const switchProvider = (p: Provider) => {
+  const switchProvider = (p: Tool) => {
     if (p === provider) return;
     setProvider(p);
     setQuery("");
@@ -556,10 +637,16 @@ export default function App() {
     const parts = [a?.desktopCurrent && "Desktop", a?.cliCurrent && "CLI"].filter(Boolean);
     return parts.length ? ` · ${parts.join(" + ")}` : "";
   };
-  const accountList = overview[provider]?.accounts ?? [];
+  // Every tool with chats, plus the three main ones. The picker grows with the tools ChatVault supports.
+  const toolList: Tool[] = ["all", ...PROVIDERS.filter((p) => CORE_PROVIDERS.includes(p) || (overview[p]?.total ?? 0) > 0 || p === provider)];
+  const stackTools = toolList.filter((x): x is Provider => x !== "all");
+  const toolName = (p: Tool) => (p === "all" ? "All chats" : PROVIDER_NAME[p]);
+  const toolTotal = (p: Tool) => (p === "all" ? PROVIDERS.reduce((n, x) => n + (overview[x]?.total ?? 0), 0) : overview[p]?.total ?? 0);
+  const toolItems = Object.fromEntries(toolList.map((p) => [p, toolName(p)]));
+  const accountList = provider === "all" ? [] : overview[provider]?.accounts ?? [];
   const accountItems = useMemo(
     () => ({
-      all: `All accounts · ${(overview[provider]?.total ?? 0).toLocaleString()}`,
+      all: `All accounts · ${toolTotal(provider).toLocaleString()}`,
       ...Object.fromEntries(accountList.map((a) => [a.id, `${accountLabel(a.id)} · ${a.count.toLocaleString()}${provider === "claude" ? tag(a.id) : ""}`])),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -568,8 +655,9 @@ export default function App() {
 
   const lq = q.toLowerCase();
   const pinnedShown = pinned.filter((c) => !lq || named(c).title.toLowerCase().includes(lq) || c.project.toLowerCase().includes(lq));
-  const recent = items.filter((c) => !pinSet.has(chatKey(c)));
-  const projectNames = useMemo(() => groupByProject(recent).map(([name]) => name), [recent]);
+  const recent = useMemo(() => items.filter((c) => !pinSet.has(chatKey(c))), [items, pinSet]);
+  const projectGroups = useMemo(() => groupByProject(recent), [recent]);
+  const projectNames = useMemo(() => projectGroups.map(([name]) => name), [projectGroups]);
   const allProjectsClosed = projectNames.length > 0 && projectNames.every((n) => !projectOpen(n));
   const msgs: Msg[] | null = page?.messages ?? null;
 
@@ -600,8 +688,21 @@ export default function App() {
       group: "Chat",
       run: async () => archive(c),
     },
+    { id: "tags", label: "Tags", hint: "Add your own labels to this chat. Only shown in ChatVault.", icon: Tag, group: "Chat", run: async () => setTagging(c) },
     { id: "rename", label: "Rename", hint: "Give this chat your own name. The original is not changed.", icon: Pencil, group: "Chat", run: async () => setRenaming(c) },
-  ] as ChatAction[]).filter((a) => !(a.id === "delete" && c.provider === "cursor")));
+  ] as ChatAction[]).filter((a) => !(a.id === "delete" && isHandoffOnly(c.provider))));
+
+  const loadTags = useCallback(() => {
+    if (!isTauri) return;
+    Promise.all((provider === "all" ? PROVIDERS : [provider]).map((p) => invoke<[string, number][]>("all_tags", { provider: p }).catch(() => [] as [string, number][])))
+      .then((lists) => {
+        const sum = new Map<string, number>();
+        lists.flat().forEach(([t, n]) => sum.set(t, (sum.get(t) ?? 0) + n));
+        setTagList([...sum].sort((a, b) => a[0].localeCompare(b[0])));
+      })
+      .catch(() => {});
+  }, [provider]);
+  useEffect(loadTags, [loadTags, reloadKey]);
 
   const archive = async (c: Chat) => {
     const to = !c.userArchived;
@@ -615,7 +716,42 @@ export default function App() {
     }
   };
 
-  const row = (c: Chat) => (
+  /** Right-click on the empty part of the sidebar: how the list is organised, sorted and filtered, plus the usual tools. */
+  const listEntries = (): Entry[] => [
+    { type: "item", label: "Refresh", icon: <RefreshCw strokeWidth={1.5} />, onSelect: () => void rescan() },
+    { type: "sep" },
+    { type: "label", label: "Organize" },
+    { type: "check", label: "By project", icon: <FolderOpen strokeWidth={1.5} />, checked: organize === "project", onSelect: () => setOrganize("project") },
+    { type: "check", label: "In one list", icon: <ListFilter strokeWidth={1.5} />, checked: organize === "list", onSelect: () => setOrganize("list") },
+    ...(organize === "project" && projectNames.length > 0
+      ? ([{ type: "item", label: allProjectsClosed ? "Expand all projects" : "Collapse all projects", icon: <ChevronsUpDown strokeWidth={1.5} />, onSelect: () => { setProjectsMode(allProjectsClosed ? "open" : "closed"); setProjectExceptions([]); } }] as Entry[])
+      : []),
+    { type: "sep" },
+    { type: "sub", label: "Sort chats by", icon: <ArrowUpDown strokeWidth={1.5} />, entries: Object.entries(SORTS).map(([k, label]) => ({ type: "check", label, checked: sort === k, onSelect: () => setSort(k) }) as Entry) },
+    {
+      type: "sub",
+      label: "Show",
+      icon: <Eye strokeWidth={1.5} />,
+      entries: [
+        ...Object.entries(SCOPES).map(([k, label]) => ({ type: "check", label, checked: scope === k, onSelect: () => setScope(k) }) as Entry),
+        ...(tagList.length ? ([{ type: "sep" }] as Entry[]) : []),
+        ...tagList.map(([t, n]) => ({ type: "check", label: `${t} (${n})`, icon: <Tag strokeWidth={1.5} />, checked: scope === `tag:${t}`, onSelect: () => setScope(`tag:${t}`) }) as Entry),
+      ],
+    },
+    { type: "item", label: "Reset", icon: <RotateCcw strokeWidth={1.5} />, disabled: sort === "recent" && scope === "all" && organize === "list", onSelect: () => { setSort("recent"); setScope("all"); setOrganize("list"); } },
+    { type: "sep" },
+    { type: "item", label: "Search all chats", icon: <Search strokeWidth={1.5} />, onSelect: () => openSearch() },
+    { type: "item", label: "Sync & backup", icon: <DatabaseBackup strokeWidth={1.5} />, onSelect: () => setSyncOpen(true) },
+    { type: "item", label: "Hide the sidebar", icon: <PanelLeft strokeWidth={1.5} />, onSelect: () => setSidebarOpen(false) },
+  ];
+
+  // Stable wrappers around the latest closures, so a card only re-renders when its own data changes.
+  const latest = useRef({ extras, open });
+  latest.current = { extras, open };
+  const getExtras = useCallback((c: Chat) => latest.current.extras(c), []);
+  const openChat = useCallback((c: Chat) => latest.current.open(c), []);
+
+  const row = (c: Chat, inProject = false) => (
     <ChatRow
       key={chatKey(c)}
       chat={named(c)}
@@ -623,9 +759,10 @@ export default function App() {
       pinned={pinSet.has(chatKey(c))}
       live={liveKeys.has(chatKey(c))}
       hit={hits?.[c.id]}
+      inProject={inProject}
       msgs={selected?.id === c.id ? msgs : null}
-      extras={extras(c)}
-      onOpen={() => open(c)}
+      getExtras={getExtras}
+      onOpen={openChat}
       toast={say}
     />
   );
@@ -639,7 +776,7 @@ export default function App() {
                 <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
               </Button>
             </Tip>
-            <Tip label="Copy every Claude and Codex chat to your Documents folder, or restore them.">
+            <Tip label="Copy every chat from all your AI tools to your Documents folder, or restore them.">
               <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>
                 <DatabaseBackup className="size-4" /> Sync &amp; backup
               </Button>
@@ -660,7 +797,7 @@ export default function App() {
                 className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 p-1 text-left outline-none"
               >
                 <AppLogo className="size-7 shrink-0 rounded-lg ring-1 ring-border" />
-                <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-2">
                   <h1 className="truncate text-base font-medium leading-tight">ChatVault</h1>
                 </div>
               </button>
@@ -668,17 +805,7 @@ export default function App() {
           ) : null}
           <div className={cn("flex min-h-0 w-[320px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
 
-          <div className="space-y-2 px-3 pb-2">
-            <Tabs value={provider} onValueChange={(v) => switchProvider(v as Provider)}>
-              <TabsList className="grid w-full grid-cols-3">
-                {PROVIDERS.map((p) => (
-                  <TabsTrigger key={p} value={p} className="gap-1.5">
-                    <ProviderLogo provider={p} className="size-4" />
-                    {PROVIDER_SHORT[p]}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
+          <div className="space-y-2 px-3 pb-3">
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
               <Input
@@ -686,39 +813,50 @@ export default function App() {
                 placeholder="Search chats"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && runDeepSearch()}
               />
+              {searching && <Loader2 className="absolute right-2.5 top-2.5 size-4 animate-spin text-muted-foreground" />}
             </div>
-            <Select value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
-              <SelectTrigger className="h-9 w-full">
-                <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent alignItemWithTrigger={false} align="start" sideOffset={6}>
-                {Object.entries(accountItems).map(([id, label]) => (
-                  <SelectItem key={id} value={id}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {searching && <p className="text-xs text-muted-foreground">Searching inside every chat…</p>}
-            {hits && !searching && (
-              <p className="text-xs text-muted-foreground">
-                {Object.keys(hits).length} chats contain “{query}”.{" "}
-                <button className="underline" onClick={() => setReloadKey((k) => k + 1)}>
-                  Clear
-                </button>
-              </p>
-            )}
+            <div className={cn("grid gap-2", provider === "all" ? "grid-cols-1" : "grid-cols-2")}>
+              <Select value={provider} onValueChange={(v) => v && switchProvider(v as Tool)} items={toolItems}>
+                <SelectTrigger className="h-9 w-full min-w-0">
+                  {provider === "all" ? <Layers className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /> : <ProviderLogo provider={provider} className="size-4 shrink-0" />}
+                  <SelectValue />
+                  {provider === "all" && <ProviderStack providers={stackTools} className="ml-auto mr-1" />}
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false} align="start" sideOffset={6} className={cn("max-w-none", provider === "all" ? "w-(--anchor-width)" : "w-[calc(var(--anchor-width)*2+0.5rem)]")}>
+                  {toolList.map((p) => (
+                    <SelectItem key={p} value={p} className="pr-1" trailing={<span className="min-w-7 text-right text-xs tabular-nums text-muted-foreground">{toolTotal(p).toLocaleString()}</span>}>
+                      {p === "all" ? <Layers className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /> : <ProviderLogo provider={p} className="size-4 shrink-0" />}
+                      <span className="flex-1">{toolName(p)}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {provider !== "all" && (
+              <Select value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
+                <SelectTrigger className="h-9 w-full">
+                  <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false} align="end" sideOffset={6} className="w-72">
+                  {Object.entries(accountItems).map(([id, label]) => (
+                    <SelectItem key={id} value={id}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              )}
+            </div>
           </div>
-          <Separator />
+          <Separator className="mx-3 w-auto opacity-70" />
 
+          <ContextArea className="flex min-h-0 flex-1 flex-col" entries={() => listEntries()} onError={(e) => say(String(e))}>
           <FadedScroll className="flex-1" fadeTop={false}>
             <div className="p-1.5 pr-3.5">
               {pinnedShown.length > 0 && (
                 <Section title="Pinned" count={pinnedShown.length} open={pinnedOpen} onOpenChange={setPinnedOpen}>
-                  {pinnedShown.map(row)}
+                  {pinnedShown.map((c) => row(c))}
                 </Section>
               )}
               <Section
@@ -747,6 +885,7 @@ export default function App() {
                   <FiltersMenu
                     sort={sort}
                     scope={scope}
+                    tags={tagList}
                     organize={organize}
                     onSort={setSort}
                     onScope={setScope}
@@ -760,9 +899,8 @@ export default function App() {
                   </div>
                 }
               >
-                {error && <p className="p-3 text-sm text-destructive">{error}</p>}
-                {(loadingList || !!indexing) && items.length === 0 && <SidebarSkeleton rows={8} />}
-                {!loadingList && !indexing && !error && recent.length === 0 && (
+                {(loadingList || !!indexing || (searching && items.length === 0)) && items.length === 0 && <SidebarSkeleton rows={searching ? 5 : 8} />}
+                {!loadingList && !indexing && !searching && !error && recent.length === 0 && (
                   <div className="flex flex-col items-center gap-2 p-8 text-center">
                     <Search className="size-8 text-muted-foreground" strokeWidth={1.25} />
                     <p className="text-sm font-medium">No Chats Found</p>
@@ -770,7 +908,7 @@ export default function App() {
                   </div>
                 )}
                 {organize === "project"
-                  ? groupByProject(recent).map(([project, list]) => {
+                  ? projectGroups.map(([project, list]) => {
                       const isOpen = projectOpen(project);
                       return (
                         <Collapsible
@@ -778,18 +916,21 @@ export default function App() {
                           open={isOpen}
                           onOpenChange={(o) => setProjectExceptions((c) => (o === (projectsMode === "open") ? c.filter((x) => x !== project) : c.includes(project) ? c : [...c, project]))}
                           className="pt-1"
+                          onPointerEnter={() => setWarmProjects((w) => (w.has(project) ? w : new Set(w).add(project)))}
                         >
                           <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground">
                             <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
                             <FolderOpen className="size-3.5 shrink-0" strokeWidth={1.5} />
-                            <span className="min-w-0 flex-1 truncate text-left">{project}</span>
-                            <span>{list.length}</span>
+                            <span className="min-w-0 flex-1 truncate text-left">{prettyProject(project)}</span>
+                            <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums text-muted-foreground">{list.length}</Badge>
                           </CollapsibleTrigger>
-                          <CollapsibleContent className="space-y-0.5">{list.map(row)}</CollapsibleContent>
+                          <CollapsibleContent className="space-y-0.5" keepMounted={warmProjects.has(project)}>
+                            {(isOpen || warmProjects.has(project)) && list.map((c) => row(c, true))}
+                          </CollapsibleContent>
                         </Collapsible>
                       );
                     })
-                  : recent.map(row)}
+                  : recent.map((c) => row(c))}
                 {hasMore && (
                   <div ref={sentinelRef}>
                     <SidebarSkeleton rows={3} />
@@ -798,14 +939,27 @@ export default function App() {
               </Section>
             </div>
           </FadedScroll>
+          </ContextArea>
           </div>
         </aside>
 
         {/* Content */}
         <div className="flex min-w-0 flex-1 flex-col">
-        <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${selected.project}` : undefined} actions={selected ? controls : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
+        <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${prettyProject(selected.project)}` : undefined} actions={selected ? controls : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {!selected ? (
+          {searchAll ? (
+            <GlobalSearch
+              key={searchSeed}
+              initial={searchSeed}
+              titleOf={(c) => named(c).title}
+              onClose={() => setSearchAll(false)}
+              onOpenChat={(c) => {
+                setSearchAll(false);
+                if (c.provider !== provider) setProvider(c.provider);
+                open(c);
+              }}
+            />
+          ) : !selected ? (
             <OverviewPage
               actions={controls}
               indexing={indexing}
@@ -819,7 +973,13 @@ export default function App() {
                 open(c);
               }}
               onSync={() => setSyncOpen(true)}
-              onSearch={() => setPaletteOpen(true)}
+              onSearch={() => openSearch()}
+              dark={dark}
+              onTheme={() => setDark((d) => !d)}
+              onRefresh={() => void rescan()}
+              onShowTool={(p) => switchProvider(p)}
+              onOpenBackup={() => void invoke("open_backup_folder").catch((e) => say(String(e)))}
+              rowEntries={(c) => chatEntries(named(c), say, null, extras(c))}
             />
           ) : (
             <ChatView
@@ -840,6 +1000,9 @@ export default function App() {
               onArchive={() => void archive(selected)}
               onRename={() => setRenaming(selected)}
               onDelete={() => setDeleting(selected)}
+              onSearchAll={(q) => openSearch(q)}
+              onRefresh={() => { void rescan(); open(selected); }}
+              onOverview={() => setSelected(null)}
               toast={say}
             />
           )}
@@ -849,7 +1012,7 @@ export default function App() {
         <CommandPalette
           open={paletteOpen}
           onOpenChange={setPaletteOpen}
-          provider={provider}
+          provider={provider === "all" ? "claude" : provider}
           pinned={pinned}
           titleOf={(c) => named(c).title}
           onOpenChat={(c) => {
@@ -857,7 +1020,7 @@ export default function App() {
             open(c);
           }}
           actions={[
-            { id: "overview", label: "Go to the overview", icon: <LayoutDashboard className="size-4" />, run: () => setSelected(null) },
+            { id: "overview", label: "Back to Home", icon: <LayoutDashboard className="size-4" />, run: () => setSelected(null) },
             { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
             { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => switchProvider("codex") },
             { id: "sync", label: "Sync & backup", icon: <DatabaseBackup className="size-4" />, run: () => setSyncOpen(true) },
@@ -884,6 +1047,15 @@ export default function App() {
             setReloadKey((n) => n + 1);
           }}
         />
+        <TagsDialog
+          chat={tagging}
+          suggestions={tagList.map(([t]) => t)}
+          onClose={() => setTagging(null)}
+          onSaved={() => {
+            loadTags();
+            void quietReload();
+          }}
+        />
         <RenameDialog
           chat={renaming}
           current={renaming ? (names[chatKey(renaming)] ?? "") : ""}
@@ -901,7 +1073,11 @@ export default function App() {
 
 const groupByProject = (list: Chat[]) => {
   const map = new Map<string, Chat[]>();
-  list.forEach((c) => map.set(c.project, [...(map.get(c.project) ?? []), c]));
+  list.forEach((c) => {
+    const g = map.get(c.project);
+    if (g) g.push(c);
+    else map.set(c.project, [c]);
+  });
   return [...map.entries()];
 };
 
@@ -926,7 +1102,7 @@ function Section({ title, count, open, onOpenChange, action, children }: { title
 const SORTS: Record<string, string> = { recent: "Most recent", oldest: "Oldest first", title: "Title A to Z", size: "Largest first" };
 const SCOPES: Record<string, string> = { all: "All", live: "On this PC", backup: "Backup only", archived: "Archived" };
 
-function FiltersMenu({ sort, scope, organize, onSort, onScope, onOrganize, onReset }: { sort: string; scope: string; organize: string; onSort: (s: string) => void; onScope: (s: string) => void; onOrganize: (s: string) => void; onReset: () => void }) {
+function FiltersMenu({ sort, scope, organize, tags, onSort, onScope, onOrganize, onReset }: { tags: [string, number][]; sort: string; scope: string; organize: string; onSort: (s: string) => void; onScope: (s: string) => void; onOrganize: (s: string) => void; onReset: () => void }) {
   const applied = (sort !== "recent" ? 1 : 0) + (scope !== "all" ? 1 : 0);
   return (
     <DropdownMenu>
@@ -984,6 +1160,12 @@ function FiltersMenu({ sort, scope, organize, onSort, onScope, onOrganize, onRes
                   {label}
                 </DropdownMenuRadioItem>
               ))}
+              {tags.length > 0 && <DropdownMenuSeparator />}
+              {tags.map(([t, n]) => (
+                <DropdownMenuRadioItem key={t} value={`tag:${t}`}>
+                  <Tag className="size-3.5" strokeWidth={1.5} /> {t} <span className="ml-auto text-xs text-muted-foreground">{n}</span>
+                </DropdownMenuRadioItem>
+              ))}
             </DropdownMenuRadioGroup>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
@@ -1002,8 +1184,9 @@ const ChatRow = memo(function ChatRow({
   pinned,
   live,
   hit,
+  inProject,
   msgs,
-  extras,
+  getExtras,
   onOpen,
   toast,
 }: {
@@ -1012,45 +1195,25 @@ const ChatRow = memo(function ChatRow({
   pinned: boolean;
   live?: boolean;
   hit?: string;
+  inProject?: boolean;
   msgs: Msg[] | null;
-  extras: ChatAction[];
-  onOpen: () => void;
+  getExtras: (c: Chat) => ChatAction[];
+  onOpen: (c: Chat) => void;
   toast: (m: string) => void;
 }) {
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => e.key === "Enter" && onOpen()}
-      className={cn("group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted/50 dark:hover:bg-white/5", selected && "border-border bg-muted hover:bg-muted dark:border-white/15 dark:bg-white/10 dark:hover:bg-white/10")}
-    >
-      <div className="flex items-start gap-2.5">
-        <div className={cn("relative mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-white dark:group-hover:bg-white/10", selected && "bg-white dark:bg-white/10")}>
-          <ProviderLogo provider={chat.provider} className="size-5" />
-          {live && (
-            <span className="absolute -right-1 -top-1 flex size-2" aria-label="An agent is working in this chat">
-              <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex size-2 rounded-full bg-emerald-500 ring-[1.5px] ring-background" />
-            </span>
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <span className="min-w-0 flex-1 truncate text-sm font-medium">{chat.title}</span>
-            {pinned && <Pin className="size-3 shrink-0 text-muted-foreground" />}
-            {(chat.archived || chat.backup) && <Archive className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}
-            <ChatMenu chat={chat} toast={toast} msgs={msgs} extras={extras} />
-          </div>
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="truncate">{chat.project}</span>
-            <span>·</span>
-            <span className="shrink-0">{fmtDate(chat.lastMs)}</span>
-          </div>
-          {hit && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{hit}</p>}
-        </div>
-      </div>
-    </div>
+    <ChatCard
+      chat={chat}
+      selected={selected}
+      pinned={pinned}
+      live={live}
+      hit={hit}
+      inProject={inProject}
+      onOpen={() => onOpen(chat)}
+      menu={<ChatMenu chat={chat} toast={toast} msgs={msgs} getExtras={() => getExtras(chat)} />}
+      entries={() => chatEntries(chat, toast, msgs, getExtras(chat))}
+      onError={(e) => toast(String(e))}
+    />
   );
 });
 
@@ -1146,12 +1309,54 @@ function RenameDialog({ chat, current, onClose, onSave }: { chat: Chat | null; c
   );
 }
 
+/** "Continue in Gemini CLI" / "Copy Codex command" under a heading that already says it: just "Gemini CLI", "Codex". */
+const shortName = (a: ChatAction) => a.label.replace(/^Continue in /, "").replace(/^Copy /, "").replace(/ command$/, "");
+const isToolCommand = (a: ChatAction) => a.id.startsWith("copy-") && !COPY_CONTENT_IDS.includes(a.id);
+
+/**
+ * The right-click menu of a chat (sidebar and overview). Ordered by what people do most: pick the chat up again, open it,
+ * keep it tidy, move it to another tool, take a copy of it, find its folder, and last of all delete it.
+ */
+function chatEntries(chat: Chat, toast: (m: string) => void, msgs: Msg[] | null, extras: ChatAction[]): Entry[] {
+  const all = [...extras, ...chatActions(chat, toast, msgs)];
+  const byId = (id: string) => all.find((a) => a.id === id);
+  const item = (a: ChatAction | undefined, label?: string): Entry[] => {
+    if (!a) return [];
+    return [{ type: "item", label: label ?? a.label, icon: <ActionIcon action={a} className="size-4" />, onSelect: () => runAction(a.label, a.run), danger: a.danger }];
+  };
+  const handoff = continueTargets(all);
+  const commands = all.filter(isToolCommand);
+  const more: Entry[] = [
+    ...item(byId("copy-md"), "Conversation as Markdown"),
+    ...item(byId("copy-id"), "Chat ID"),
+    ...item(byId("fork")),
+    ...(commands.length ? ([{ type: "sep" }, { type: "label", label: "Copy the command to start" }, ...commands.flatMap((a) => item(a, shortName(a)))] as Entry[]) : []),
+  ];
+  const saveItems = all.filter((a) => a.group === "Save").flatMap((a) => item(a));
+  // The same order as the "…" menu on the card and the right-click menu inside a chat.
+  return [
+    ...item(byId("view")),
+    ...(handoff.length ? ([{ type: "sub", label: "Continue this chat in", icon: <ArrowRightLeft strokeWidth={1.5} />, entries: handoff.flatMap((a) => item(a, shortName(a))) }] as Entry[]) : []),
+    { type: "sep" },
+    ...item(byId("copy-prompt")),
+    ...item(byId("copy-path")),
+    ...(more.length ? ([{ type: "sub", label: "More copy options", icon: <Copy strokeWidth={1.5} />, entries: more }] as Entry[]) : []),
+    ...(saveItems.length ? ([{ type: "sub", label: "Save as", icon: <Save strokeWidth={1.5} />, entries: saveItems }] as Entry[]) : []),
+    { type: "sep" },
+    ...["pin", "rename", "tags", "archive"].flatMap((id) => item(byId(id))),
+    { type: "sep" },
+    ...item(byId("folder")),
+    { type: "sep" },
+    ...item(byId("delete")),
+  ];
+}
+
 const QUICK = ["continue-claude", "continue-codex", "fork", "folder", "copy-id"];
 
-function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string) => void; msgs: Msg[] | null; extras: ChatAction[] }) {
+function ChatMenu({ chat, toast, msgs, getExtras }: { chat: Chat; toast: (m: string) => void; msgs: Msg[] | null; getExtras: () => ChatAction[] }) {
   const [open, setOpen] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const actions = [...extras, ...chatActions(chat, toast, msgs).filter((a) => QUICK.includes(a.id))];
+  // Built only while the menu is open: the closed button needs none of it.
+  const actions = !open ? [] : [...getExtras(), ...chatActions(chat, toast, msgs).filter((a) => QUICK.includes(a.id) || a.id.startsWith("continue-") || a.id.startsWith("copy-") || a.group === "Save")];
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(false);
@@ -1162,29 +1367,43 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
       window.removeEventListener("resize", close);
     };
   }, [open]);
-  const groups = ["Chat", "Continue", "Open", "Copy", "Save"] as const;
-  const inGroup = (a: ChatAction, g: string) => a.group === g;
-  const renderItem = (a: ChatAction) => {
-    const Icon = a.icon;
+  const byId = (id: string) => actions.find((a) => a.id === id);
+  // Grouped by what you want to do: open it, continue it, copy it for an AI, save it, tidy it, find its folder, delete it.
+  const organise = ["pin", "rename", "tags", "archive"].map(byId).filter(Boolean) as ChatAction[];
+  const view = ["view"].map(byId).filter(Boolean) as ChatAction[];
+  const others = continueTargets(actions);
+  const files = ["folder"].map(byId).filter(Boolean) as ChatAction[];
+  const commands = actions.filter(isToolCommand);
+  const copyIds = ["copy-md", "copy-id", "fork"].map(byId).filter(Boolean) as ChatAction[];
+  // The two copies people reach for most sit on the menu itself, not inside "Copy".
+  const quickCopies = ["copy-prompt", "copy-path"].map(byId).filter(Boolean) as ChatAction[];
+  const saves = actions.filter((a) => a.group === "Save");
+  // Rows that open a panel to the side, so the list itself stays short.
+  const folds: { label: string; icon: LucideIcon; heading: string; items: ChatAction[]; sub?: { heading: string; items: ChatAction[] } }[] = [
+    { label: "Continue this chat in", icon: ArrowRightLeft, heading: "Continue this chat in", items: others },
+    { label: "More copy options", icon: Copy, heading: "Copy this chat", items: copyIds, sub: { heading: "Copy the command to start", items: commands } },
+    { label: "Save as", icon: Save, heading: "Save this chat", items: saves },
+  ].filter((f) => f.items.length || f.sub?.items.length);
+  const sections: { items: ChatAction[]; folds?: string[] }[] = [
+    { items: view },
+    { items: [], folds: ["Continue this chat in"] },
+    { items: quickCopies, folds: ["More copy options"] },
+    { items: [], folds: ["Save as"] },
+    { items: organise },
+    { items: files },
+    { items: actions.filter((a) => a.danger) },
+  ];
+  const renderItem = (a: ChatAction, short = false) => {
     return (
       <button
         key={a.id}
-        disabled={busyId !== null}
         className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && "text-destructive hover:bg-destructive/10")}
-        onClick={async () => {
-          setBusyId(a.id);
-          try {
-            await a.run();
-            setOpen(false);
-          } catch (e) {
-            toast(String(e));
-          } finally {
-            setBusyId(null);
-          }
-        }}
-      >
-        {busyId === a.id ? <Loader2 className="size-4 animate-spin" /> : <Icon className={cn("size-4", a.danger ? "text-destructive" : "text-muted-foreground")} strokeWidth={1.5} />}
-        {a.label}
+        onClick={() => {
+          setOpen(false);
+          void runAction(a.label, a.run);
+        }}      >
+        <ActionIcon action={a} className={cn("size-4", !a.logo && (a.danger ? "text-destructive" : "text-muted-foreground"))} />
+        {short ? shortName(a) : a.label}
       </button>
     );
   };
@@ -1207,23 +1426,40 @@ function ChatMenu({ chat, toast, msgs, extras }: { chat: Chat; toast: (m: string
         <MoreHorizontal className="size-4" />
       </PopoverTrigger>
       <PopoverContent side="right" align="start" sideOffset={8} className="w-64 gap-0 p-1" onClick={(e) => e.stopPropagation()}>
-        {groups.map((g, gi) => {
-          const items = actions.filter((a) => inGroup(a, g) && !a.danger);
-          if (!items.length) return null;
-          return (
-            <div key={g}>
-              {gi > 0 && <Separator className="my-1" />}
-              {g !== "Chat" && <p className="px-2 pb-0.5 pt-1.5 text-xs text-muted-foreground">{g}</p>}
-              {items.map(renderItem)}
+        {sections
+          .filter((sec) => sec.items.length || folds.some((f) => sec.folds?.includes(f.label)))
+          .map((sec, i) => (
+            <div key={i}>
+              {i > 0 && <Separator className="my-1" />}
+              {sec.items.map((a) => renderItem(a))}
+              {folds
+                .filter((f) => sec.folds?.includes(f.label))
+                .map((f) => (
+                  <Popover key={f.label}>
+                    <PopoverTrigger
+                      openOnHover
+                      delay={60}
+                      render={<button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted data-popup-open:bg-muted" />}
+                    >
+                      <f.icon className="size-4 text-muted-foreground" strokeWidth={1.5} />
+                      <span className="flex-1">{f.label}</span>
+                      <ChevronRight className="size-4 text-muted-foreground" strokeWidth={1.5} />
+                    </PopoverTrigger>
+                    <PopoverContent side="right" align="start" sideOffset={6} className="w-52 gap-0 p-1" onClick={(e) => e.stopPropagation()}>
+                      <p className="px-2 pb-0.5 pt-1.5 text-xs text-muted-foreground">{f.heading}</p>
+                      {f.items.map((a) => renderItem(a, f.label === "Continue this chat in"))}
+                      {f.sub && f.sub.items.length > 0 && (
+                        <>
+                          <Separator className="my-1" />
+                          <p className="px-2 pb-0.5 pt-1.5 text-xs text-muted-foreground">{f.sub.heading}</p>
+                          {f.sub.items.map((a) => renderItem(a, true))}
+                        </>
+                      )}
+                    </PopoverContent>
+                  </Popover>
+                ))}
             </div>
-          );
-        })}
-        {actions.some((a) => a.danger) && (
-          <div>
-            <Separator className="my-1" />
-            {actions.filter((a) => a.danger).map(renderItem)}
-          </div>
-        )}
+          ))}
       </PopoverContent>
     </Popover>
   );

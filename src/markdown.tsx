@@ -4,6 +4,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { Cite } from "@/ai-elements";
 import { Highlight, textHas } from "@/highlight";
+import { isFilePath, useFileView } from "@/file-viewer";
 
 const text = (node: ReactNode): string =>
   Children.toArray(node)
@@ -15,6 +16,7 @@ const text = (node: ReactNode): string =>
  * tables, rules and inline code. Links become inline citations and search matches stay highlighted.
  */
 export function Markdown({ source, q, active, breaks }: { source: string; q: string; active: boolean; breaks?: boolean }) {
+  const files = useFileView();
   let taken = false;
   const hl = (children: ReactNode): ReactNode =>
     Children.map(children, (c) => {
@@ -42,7 +44,17 @@ export function Markdown({ source, q, active, breaks }: { source: string; q: str
     em: ({ children }) => <em className="italic">{hl(children)}</em>,
     del: ({ children }) => <del className="text-muted-foreground">{hl(children)}</del>,
     a: ({ href, children }) => (href ? <Cite url={href} label={text(children)} /> : <>{hl(children)}</>),
-    code: ({ children }) => <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.85em] [pre_&]:bg-transparent [pre_&]:p-0">{hl(children)}</code>,
+    code: ({ children }) => {
+      const t = text(children);
+      if (isFilePath(t)) {
+        return (
+          <button type="button" onClick={() => files.open(t)} className="cursor-pointer rounded bg-muted px-1 py-0.5 text-left font-mono text-[0.85em] underline decoration-dotted decoration-muted-foreground/60 underline-offset-2 hover:bg-accent hover:decoration-solid">
+            {hl(children)}
+          </button>
+        );
+      }
+      return <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.85em] [pre_&]:bg-transparent [pre_&]:p-0">{hl(children)}</code>;
+    },
     pre: ({ children }) => <pre className="my-2 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">{children}</pre>,
     table: ({ children }) => (
       <div className="my-3 overflow-auto rounded-lg border">

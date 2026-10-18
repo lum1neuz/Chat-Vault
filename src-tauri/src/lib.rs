@@ -1,5 +1,6 @@
 mod cursor;
 mod index;
+mod others;
 mod paths;
 mod providers;
 mod sync;
@@ -28,8 +29,21 @@ struct MsgPage {
     start: usize,
 }
 
+/// Cursor and the other tools whose chats live in a database or in one JSON file, not in a transcript line by line.
+fn is_virtual(p: &str) -> bool {
+    p == "cursor" || others::TOOLS.contains(&p)
+}
+
+fn read_virtual(provider: &str, path: &str) -> Result<Vec<Msg>, String> {
+    if provider == "cursor" {
+        cursor::read(path)
+    } else {
+        others::read(path)
+    }
+}
+
 fn provider_ok(p: &str) -> Result<(), String> {
-    if p == "claude" || p == "codex" || p == "cursor" {
+    if p == "claude" || p == "codex" || p == "cursor" || others::TOOLS.contains(&p) {
         Ok(())
     } else {
         Err("Unknown provider".into())
@@ -41,7 +55,7 @@ fn valid_id(id: &str) -> bool {
 }
 
 /// Lines worth parsing. Skipping the rest keeps very large transcripts fast.
-fn relevant(provider: &str, line: &str) -> bool {
+pub(crate) fn relevant(provider: &str, line: &str) -> bool {
     if provider == "codex" {
         line.contains("\"response_item\"")
     } else {
@@ -65,7 +79,10 @@ async fn refresh_index(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn query_chats(provider: String, account: Option<String>, q: String, offset: i64, limit: i64, sort: Option<String>, scope: Option<String>) -> Result<Page, String> {
-    provider_ok(&provider)?;
+    // "all" lists the chats of every tool together.
+    if provider != "all" {
+        provider_ok(&provider)?;
+    }
     tauri::async_runtime::spawn_blocking(move || index::query(&provider, account, &q, offset, limit.clamp(1, 200), sort.as_deref().unwrap_or("recent"), scope.as_deref().unwrap_or("all")))
         .await
         .map_err(|e| e.to_string())?
@@ -107,7 +124,7 @@ struct OutlineTick {
 async fn chat_outline(provider: String, path: String) -> Result<Vec<OutlineTick>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if provider == "cursor" {
+        if is_virtual(&provider) {
             return Err("not supported".to_string());
         }
         let p = check_transcript(&path)?;
@@ -169,7 +186,7 @@ async fn fork_chat(provider: String, path: String) -> Result<Forked, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::Write;
-        if provider == "cursor" {
+        if is_virtual(&provider) {
             return Err("Cursor chats cannot be forked. Use Continue in Claude or Codex instead.".to_string());
         }
         let src = check_transcript(&path)?;
@@ -206,7 +223,7 @@ async fn fork_chat(provider: String, path: String) -> Result<Forked, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// (file count, newest change) across Claude and Codex chats, for spotting new conversations as they start.
+/// (file count, newest change) across the chat files of every tool, for spotting new conversations as they start.
 #[tauri::command]
 fn files_fingerprint() -> (usize, i64) {
     index::files_fingerprint()
@@ -402,7 +419,7 @@ fn chat_stamps(items: Vec<(String, String)>) -> Vec<u64> {
     items
         .into_iter()
         .map(|(provider, path)| {
-            if provider == "cursor" {
+            if is_virtual(&provider) {
                 return 0;
             }
             let Ok(p) = check_transcript(&path) else { return 0 };
@@ -433,7 +450,7 @@ async fn read_chat_tail(provider: String, path: String, limit: usize) -> Result<
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{Read, Seek, SeekFrom};
-        if provider == "cursor" {
+        if is_virtual(&provider) {
             return Err("not supported".to_string());
         }
         let p = check_transcript(&path)?;
@@ -481,8 +498,8 @@ async fn read_chat_tail(provider: String, path: String, limit: usize) -> Result<
 async fn read_chat_page(provider: String, path: String, before: Option<usize>, limit: usize) -> Result<MsgPage, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if provider == "cursor" {
-            let all: Vec<Msg> = cursor::read(&path)?.into_iter().map(|m| clip_msg(m, 30_000)).collect();
+        if is_virtual(&provider) {
+            let all: Vec<Msg> = read_virtual(&provider, &path)?.into_iter().map(|m| clip_msg(m, 30_000)).collect();
             let total = all.len();
             let limit = limit.clamp(1, 2000);
             let end = before.map(|b| b.min(total)).unwrap_or(total);
@@ -533,8 +550,8 @@ async fn read_chat_page(provider: String, path: String, before: Option<usize>, l
 async fn read_chat_all(provider: String, path: String) -> Result<Vec<Msg>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if provider == "cursor" {
-            return Ok(cursor::read(&path)?.into_iter().filter(is_readable).map(|m| clip_msg(m, 20_000)).collect());
+        if is_virtual(&provider) {
+            return Ok(read_virtual(&provider, &path)?.into_iter().filter(is_readable).map(|m| clip_msg(m, 20_000)).collect());
         }
         let p = check_transcript(&path)?;
         let lines = open_lines(&p).ok_or("Cannot open that chat")?;
@@ -553,65 +570,42 @@ async fn read_chat_all(provider: String, path: String) -> Result<Vec<Msg>, Strin
     .map_err(|e| e.to_string())?
 }
 
-/// Searches the text of the most recent chats of one provider.
+/// Searches inside every chat of one tool using the full-text index, so it answers at once.
 #[tauri::command]
 async fn deep_search(provider: String, query: String) -> Result<Vec<SearchHit>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let q = query.trim().to_lowercase();
-        if q.chars().count() < 2 {
+        if query.trim().chars().count() < 2 {
             return Ok(Vec::new());
         }
-        let mut hits = Vec::new();
-        if provider == "cursor" {
-            for (id, path) in index::recent_paths(&provider, 3000)? {
-                let Ok(msgs) = cursor::read(&path) else { continue };
-                if let Some(m) = msgs.iter().filter(|m| is_readable(m)).find(|m| m.text.to_lowercase().contains(&q)) {
-                    let low = m.text.to_lowercase();
-                    let pos = low.find(&q).unwrap_or(0);
-                    let start = m.text[..pos.min(m.text.len())].char_indices().rev().nth(40).map(|(i, _)| i).unwrap_or(0);
-                    hits.push(SearchHit { id, snippet: clip(m.text[start..].replace('\n', " ").trim(), 140) });
-                }
-            }
-            return Ok(hits);
-        }
-        for (id, path) in index::recent_paths(&provider, 3000)? {
-            let Some(lines) = open_lines(Path::new(&path)) else { continue };
-            'file: for line in lines {
-                if !relevant(&provider, &line) || !line.to_lowercase().contains(&q) {
-                    continue;
-                }
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                for m in messages_for(&provider, &v) {
-                    if !is_readable(&m) {
-                        continue;
-                    }
-                    let low = m.text.to_lowercase();
-                    if let Some(pos) = low.find(&q) {
-                        let start = m.text[..pos.min(m.text.len())]
-                            .char_indices()
-                            .rev()
-                            .nth(40)
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                        hits.push(SearchHit { id: id.clone(), snippet: clip(m.text[start..].replace('\n', " ").trim(), 140) });
-                        break 'file;
-                    }
-                }
-            }
-            if hits.len() >= 300 {
-                break;
-            }
-        }
-        Ok(hits)
+        Ok(index::search_bodies(&provider, &query, 300)?.into_iter().map(|(id, snippet)| SearchHit { id, snippet: snippet.replace('\n', " ") }).collect())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+/// Builds or updates the search index in the background.
+#[tauri::command]
+async fn build_search_index(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || index::index_bodies(Some(&app)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn search_index_status() -> Result<(i64, i64), String> {
+    index::body_status()
+}
+
 #[tauri::command]
 fn reveal_in_folder(path: String) -> Result<(), String> {
-    let p = if path.starts_with("cursor-") { cursor::real_file(&path).ok_or("That Cursor file is not available")? } else { check_transcript(&path)? };
+    let p = if path.starts_with("cursor-") {
+        cursor::real_file(&path).ok_or("That Cursor file is not available")?
+    } else if others::is_virtual(&path) {
+        others::real_file(&path).ok_or("That file is not available")?
+    } else {
+        check_transcript(&path)?
+    };
     let p = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     Command::new("explorer").arg(format!("/select,{}", p)).spawn().map_err(|e| e.to_string())?;
     Ok(())
@@ -630,6 +624,9 @@ fn open_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn delete_chat(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if others::is_virtual(&path) {
+            return Err("This chat lives in the tool's own storage, so it can only be deleted there".to_string());
+        }
         if path.starts_with("cursor-") {
             return Err("Cursor chats live inside Cursor's own database, so they can only be deleted in Cursor".to_string());
         }
@@ -693,19 +690,312 @@ fn open_in_claude(local_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Writes a text file to a path the user picked in the system Save dialog. Only .md and .txt files are written.
+/// Writes a text file to a path the user picked in the system Save dialog. Only .md, .txt, .html and .json files are written.
+#[derive(Serialize)]
+struct ExportResult {
+    written: usize,
+    skipped: usize,
+    folder: String,
+}
+
+/// Saves chats as Markdown files in a folder the user picked, one subfolder per tool. A tool name restricts it to that tool.
+#[tauri::command]
+async fn export_all_markdown(folder: String, provider: Option<String>) -> Result<ExportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(&folder);
+        if !root.is_dir() {
+            return Err("That folder does not exist".to_string());
+        }
+        let tools: Vec<&str> = match provider.as_deref() {
+            Some(p) if ["claude", "codex", "cursor", "gemini", "opencode", "cline"].contains(&p) => vec![p],
+            _ => vec!["claude", "codex", "cursor", "gemini", "opencode", "cline"],
+        };
+        let (mut written, mut skipped) = (0usize, 0usize);
+        for tool in tools {
+            let dir = root.join(match tool { "claude" => "Claude Code", "codex" => "Codex", "cursor" => "Cursor", "gemini" => "Gemini CLI", "opencode" => "OpenCode", _ => "Cline" });
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            for (id, path) in index::recent_paths(tool, 20000)? {
+                let msgs: Vec<Msg> = if is_virtual(tool) {
+                    read_virtual(tool, &path).unwrap_or_default().into_iter().filter(is_readable).collect()
+                } else {
+                    let Some(lines) = open_lines(Path::new(&path)) else { skipped += 1; continue };
+                    let mut out = Vec::new();
+                    for line in lines {
+                        if !relevant(tool, &line) {
+                            continue;
+                        }
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            out.extend(messages_for(tool, &v).into_iter().filter(is_readable));
+                        }
+                    }
+                    out
+                };
+                if msgs.is_empty() {
+                    skipped += 1;
+                    continue;
+                }
+                let title = msgs.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 60)).unwrap_or_else(|| "Chat".into());
+                let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
+                let mut md = format!("# {}\n\n- Tool: {}\n- Chat id: {}\n\n", title, dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), id);
+                for m in &msgs {
+                    let who = if m.role == "user" { "You" } else { "Assistant" };
+                    md.push_str(&format!("## {} {}\n\n{}\n\n", who, m.ts, m.text.trim()));
+                }
+                let short: String = id.chars().take(8).collect();
+                let file = dir.join(format!("{}-{}.md", safe.trim().trim_end_matches('…'), short));
+                if fs::write(&file, md).is_ok() {
+                    written += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+        Ok(ExportResult { written, skipped, folder })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn set_chat_tags(provider: String, id: String, tags: Vec<String>) -> Result<(), String> {
+    provider_ok(&provider)?;
+    index::set_tags(&provider, &id, &tags)
+}
+
+#[tauri::command]
+fn chat_tags(provider: String, id: String) -> Result<Vec<String>, String> {
+    provider_ok(&provider)?;
+    index::tags_of(&provider, &id)
+}
+
+#[tauri::command]
+fn all_tags(provider: String) -> Result<Vec<(String, i64)>, String> {
+    provider_ok(&provider)?;
+    index::all_tags(&provider)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileView {
+    path: String,
+    content: String,
+    size: u64,
+    truncated: bool,
+    modified_ms: Option<i64>,
+}
+
+/// Looks for a file by name below `dir`, a few folders deep, skipping dependency and build folders.
+fn find_named(dir: &Path, name: &std::ffi::OsStr, depth: u8, budget: &mut u32) -> Option<PathBuf> {
+    let rd = fs::read_dir(dir).ok()?;
+    let mut subs = Vec::new();
+    for e in rd.flatten() {
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let p = e.path();
+        if p.is_dir() {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            if depth > 0 && !n.starts_with('.') && !["node_modules", "target", "dist", "build", "__pycache__", "vendor", "appdata"].contains(&n.as_str()) {
+                subs.push(p);
+            }
+        } else if e.file_name().eq_ignore_ascii_case(name) {
+            return Some(p);
+        }
+    }
+    subs.into_iter().find_map(|d| find_named(&d, name, depth - 1, budget))
+}
+
+/// Finds the file a chat mentions. A relative path is looked up in the chat's project folder, then under the folders of full
+/// paths the chat mentions. Only files inside the project folder or your user folder are ever opened.
+fn resolve_file(path: &str, base: &Option<String>, hints: Option<Vec<String>>) -> Result<PathBuf, String> {
+    let wanted = path.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string();
+    // a trailing :12 or :12-30 is a line reference
+    let wanted = match wanted.rsplit_once(':') {
+        Some((head, tail)) if head.len() > 1 && tail.chars().all(|c| c.is_ascii_digit() || c == '-') && !tail.is_empty() => head.to_string(),
+        _ => wanted,
+    };
+    let raw = PathBuf::from(wanted.replace('/', "\\"));
+    let basedir = base.as_ref().map(PathBuf::from).filter(|b| b.is_dir());
+    let full = if raw.is_absolute() {
+        raw
+    } else {
+        let mut found = basedir.as_ref().map(|b| b.join(&raw)).filter(|p| p.is_file());
+        if found.is_none() {
+            'hints: for h in hints.unwrap_or_default().iter().take(300) {
+                for anc in Path::new(h).ancestors().skip(1) {
+                    let cand = anc.join(&raw);
+                    if cand.is_file() {
+                        found = Some(cand);
+                        break 'hints;
+                    }
+                }
+            }
+        }
+        // A bare file name (no folder): look through the project and the usual places files are saved to.
+        if found.is_none() && raw.components().count() == 1 {
+            if let Some(name) = raw.file_name() {
+                let mut budget = 20_000u32;
+                let mut spots: Vec<(PathBuf, u8)> = Vec::new();
+                if let Some(b) = basedir.as_ref() {
+                    spots.push((b.clone(), 4));
+                }
+                if let Some(h) = home() {
+                    for d in ["Downloads", "Desktop", "Documents", "Pictures", "Videos", "Music"] {
+                        spots.push((h.join(d), 2));
+                    }
+                }
+                found = spots.into_iter().find_map(|(d, depth)| find_named(&d, name, depth, &mut budget));
+            }
+        }
+        match found {
+            Some(f) => f,
+            None if basedir.is_none() => return Err("This chat has no project folder to look in".into()),
+            None => basedir.as_ref().unwrap().join(&raw),
+        }
+    };
+    let canon = full.canonicalize().map_err(|_| format!("Could not find {} in the project or in your Downloads, Desktop, Documents or Pictures folders", wanted))?;
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(b) = basedir.as_ref().and_then(|b| b.canonicalize().ok()) {
+        roots.push(b);
+    }
+    if let Some(h) = home().and_then(|h| h.canonicalize().ok()) {
+        roots.push(h);
+    }
+    if !roots.iter().any(|r| canon.starts_with(r)) {
+        return Err("Only files in the project folder or your user folder can be shown".into());
+    }
+    if !fs::metadata(&canon).map(|m| m.is_file()).unwrap_or(false) {
+        return Err("That is a folder, not a file".into());
+    }
+    Ok(canon)
+}
+
+fn plain(p: &Path) -> String {
+    p.to_string_lossy().trim_start_matches("\\?\\").to_string()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileInfo {
+    path: String,
+    size: u64,
+    /// text, image, video, audio, pdf or other
+    kind: String,
+    ext: String,
+    modified_ms: Option<i64>,
+}
+
+/// What a file mentioned in a chat is, so the viewer can show it the right way.
+#[tauri::command]
+async fn file_info(path: String, base: Option<String>, hints: Option<Vec<String>>) -> Result<FileInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let canon = resolve_file(&path, &base, hints)?;
+        let meta = fs::metadata(&canon).map_err(|e| e.to_string())?;
+        let ext = canon.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let kind = match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" => "image",
+            "mp4" | "webm" | "mov" | "m4v" | "ogv" => "video",
+            "mp3" | "wav" | "ogg" | "oga" | "m4a" | "aac" | "flac" | "opus" => "audio",
+            "pdf" => "pdf",
+            "zip" | "rar" | "7z" | "gz" | "tar" | "exe" | "dll" | "msi" | "iso" | "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt" | "db" | "sqlite" | "bin" | "woff" | "woff2" | "ttf" | "otf" | "mkv" | "avi" | "wmv" => "other",
+            _ => {
+                // Unknown type: text if the start of the file has no binary bytes.
+                let mut head = vec![0u8; 8000];
+                let n = fs::File::open(&canon).and_then(|mut f| std::io::Read::read(&mut f, &mut head)).unwrap_or(0);
+                if head[..n].contains(&0) { "other" } else { "text" }
+            }
+        };
+        Ok(FileInfo { path: plain(&canon), size: meta.len(), kind: kind.into(), ext, modified_ms: meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64) })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The raw bytes of a picture, video, sound or PDF, for showing it in the viewer. Up to 300 MB.
+#[tauri::command]
+async fn read_file_bytes(path: String, base: Option<String>) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let canon = resolve_file(&path, &base, None)?;
+        let len = fs::metadata(&canon).map_err(|e| e.to_string())?.len();
+        if len > 300_000_000 {
+            return Err("This file is too large to show here".into());
+        }
+        let bytes = fs::read(&canon).map_err(|e| e.to_string())?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Shows a file from a chat selected in Explorer.
+#[tauri::command]
+fn reveal_file(path: String, base: Option<String>) -> Result<(), String> {
+    let canon = resolve_file(&path, &base, None)?;
+    Command::new("explorer").arg(format!("/select,{}", plain(&canon))).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Opens a file from a chat with the app Windows uses for it. Programs and scripts are never started this way.
+#[tauri::command]
+fn open_file_default(path: String, base: Option<String>) -> Result<(), String> {
+    let canon = resolve_file(&path, &base, None)?;
+    let ext = canon.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    const BLOCKED: [&str; 22] = ["exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "msi", "msp", "scr", "lnk", "hta", "reg", "cpl", "dll", "jar", "pif", "appx"];
+    if BLOCKED.contains(&ext.as_str()) {
+        return Err("Programs and scripts are not opened from here. Use Show in folder instead.".into());
+    }
+    Command::new("cmd").args(["/C", "start", ""]).arg(plain(&canon)).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reads a text file mentioned in a chat so it can be shown in the viewer: at most 1.5 MB, text only.
+#[tauri::command]
+async fn read_text_file(path: String, base: Option<String>, hints: Option<Vec<String>>) -> Result<FileView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let canon = resolve_file(&path, &base, hints)?;
+        let meta = fs::metadata(&canon).map_err(|e| e.to_string())?;
+        let size = meta.len();
+        let mut bytes = fs::read(&canon).map_err(|e| e.to_string())?;
+        let truncated = bytes.len() > 1_500_000;
+        bytes.truncate(1_500_000);
+        if bytes.iter().take(8000).any(|b| *b == 0) {
+            return Err("This looks like a binary file, so it can't be shown as text".into());
+        }
+        let modified_ms = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64);
+        Ok(FileView { path: plain(&canon), content: String::from_utf8_lossy(&bytes).to_string(), size, truncated, modified_ms })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn set_chat_archived(provider: String, id: String, archived: bool) -> Result<(), String> {
     provider_ok(&provider)?;
     index::set_archived(&provider, &id, archived)
 }
 
+/// Saves a picture from a chat to the place the user picked in the Save dialog. Only picture file types are written.
+#[tauri::command]
+fn write_image_file(path: String, bytes: Vec<u8>) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let ok = p.extension().map(|e| ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].iter().any(|x| e.eq_ignore_ascii_case(x))).unwrap_or(false);
+    if !ok {
+        return Err("Only picture files can be saved here".into());
+    }
+    fs::write(&p, bytes).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 #[tauri::command]
 fn write_text_file(path: String, content: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
-    let ok = p.extension().map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("txt")).unwrap_or(false);
+    let ok = p
+        .extension()
+        .map(|e| ["md", "txt", "html", "json"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+        .unwrap_or(false);
     if !ok {
-        return Err("Only .md and .txt files can be saved here".into());
+        return Err("Only .md, .txt, .html and .json files can be saved here".into());
     }
     fs::write(&p, content).map_err(|e| e.to_string())?;
     Ok(path)
@@ -741,7 +1031,7 @@ const HANDOFF_PROMPT: &str = "It is the transcript of an earlier AI coding sessi
 /// Opens a new PowerShell window in the chat's folder and starts Claude Code or Codex there.
 /// agent: claude | claude-fork | claude-handoff | codex-resume | codex-fork | codex-handoff
 #[tauri::command]
-fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<String>) -> Result<(), String> {
+fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<String>, prompt: Option<String>) -> Result<(), String> {
     let dir = cwd
         .filter(|c| Path::new(c).is_dir())
         .map(PathBuf::from)
@@ -754,6 +1044,13 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         }
         Ok(path)
     };
+    // The prompt ChatVault built (same text as "Copy prompt"), as the inside of a single-quoted PowerShell string.
+    let text = |path: &str| -> String {
+        match &prompt {
+            Some(p) if !p.trim().is_empty() => p.replace("'", "''"),
+            _ => format!("Read the file {} completely. {}", path, HANDOFF_PROMPT),
+        }
+    };
     let script = match agent.as_str() {
         "claude" | "claude-fork" => {
             if !valid_id(&id) {
@@ -765,7 +1062,7 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         "claude-handoff" => {
             let path = handoff_path(handoff)?;
             let folder = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            format!("claude --add-dir '{}' 'Read the file {} completely. {}'", folder, path, HANDOFF_PROMPT)
+            format!("claude '{}' --add-dir '{}'", text(&path), folder)
         }
         "codex-resume" | "codex-fork" => {
             if !valid_id(&id) {
@@ -775,7 +1072,24 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         }
         "codex-handoff" => {
             let path = handoff_path(handoff)?;
-            format!("codex 'Read the file {} completely. {}'", path, HANDOFF_PROMPT)
+            format!("codex '{}'", text(&path))
+        }
+        "gemini-handoff" => {
+            let path = handoff_path(handoff)?;
+            let folder = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            format!("gemini '{}' --include-directories '{}'", text(&path), folder)
+        }
+        "opencode-handoff" => {
+            let path = handoff_path(handoff)?;
+            format!("opencode --prompt '{}'", text(&path))
+        }
+        "cline-handoff" => {
+            let path = handoff_path(handoff)?;
+            format!("cline '{}'", text(&path))
+        }
+        "cursor-handoff" => {
+            let path = handoff_path(handoff)?;
+            format!("cursor-agent '{}'", text(&path))
         }
         _ => return Err("Unknown agent".into()),
     };
@@ -946,7 +1260,17 @@ pub fn run() {
             files_fingerprint,
             send_message,
             write_text_file,
+            write_image_file,
             set_chat_archived,
+            read_text_file,
+            file_info,
+            read_file_bytes,
+            reveal_file,
+            open_file_default,
+            set_chat_tags,
+            chat_tags,
+            all_tags,
+            export_all_markdown,
             agent_running,
             take_agent_error,
             agent_login,
@@ -954,6 +1278,8 @@ pub fn run() {
             fork_chat,
             read_chat_all,
             deep_search,
+            build_search_index,
+            search_index_status,
             reveal_in_folder,
             open_folder,
             open_backup_folder,

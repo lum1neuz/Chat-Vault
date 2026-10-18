@@ -9,7 +9,7 @@ export function Splash({ leaving }: { leaving: boolean }) {
       aria-busy="true"
       aria-label="Starting ChatVault"
     >
-      <AppLogo className="size-16 animate-pulse rounded-2xl shadow-lg ring-1 ring-border" />
+      <AppLogo className="size-16 animate-pulse rounded-2xl" />
       <p className="text-sm text-muted-foreground">Getting your chats ready…</p>
     </div>
   );
