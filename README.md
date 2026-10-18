@@ -25,7 +25,7 @@ Claude Code · Codex · Cursor — across every account you have ever signed in 
   <img src="docs/screenshots/02-chat.png" alt="A chat open in ChatVault with its plan, tool steps, table and code, with sample data" width="900" />
 </p>
 <p align="center">
-  <img src="docs/screenshots/03-continue-in-any-tool.png" alt="The chat menu: continue the same chat in Claude, Codex, Gemini CLI, Cursor Agent, OpenCode or Cline, with sample data" width="900" />
+  <img src="docs/screenshots/03-search-all-tools.png" alt="Search across every tool at once: Claude, Codex, Gemini CLI, Cursor Agent, OpenCode and Cline, with sample data" width="900" />
 </p>
 
 ---
