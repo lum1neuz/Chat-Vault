@@ -24,8 +24,32 @@ pub fn codex_home() -> Option<PathBuf> {
     home().map(|p| p.join(".codex"))
 }
 
+const BACKUP_NAME: &str = "ChatVault Backup";
+
+/// The folder picked in Sync & backup (for example inside Google Drive, so two PCs share it), otherwise Documents.
 pub fn backup_root() -> Option<PathBuf> {
-    home().map(|p| p.join("Documents").join("ChatVault Backup"))
+    let picked = data_dir()
+        .and_then(|d| fs::read_to_string(d.join("backup-folder.txt")).ok())
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| p.is_absolute());
+    picked.or_else(|| home().map(|p| p.join("Documents").join(BACKUP_NAME)))
+}
+
+/// Remembers the picked folder. Backups always go into a "ChatVault Backup" folder inside it, never loose into it.
+pub fn set_backup_root(parent: &Path) -> Result<PathBuf, String> {
+    if !parent.is_absolute() {
+        return Err("Pick a full folder path".into());
+    }
+    let root = if parent.file_name().map(|n| n == BACKUP_NAME).unwrap_or(false) { parent.to_path_buf() } else { parent.join(BACKUP_NAME) };
+    // A backup inside a chat folder would copy itself into itself.
+    let live = [claude_projects(), claude_meta(), codex_home(), home().map(|h| h.join(".cursor")), home().map(|h| h.join(".gemini")), home().map(|h| h.join(".cline")), home().map(|h| h.join(".local").join("share").join("opencode"))];
+    if live.into_iter().flatten().any(|l| root.starts_with(&l)) {
+        return Err("The backup folder can't be inside a chat folder".into());
+    }
+    let d = data_dir().ok_or("No app data folder")?;
+    fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    fs::write(d.join("backup-folder.txt"), root.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+    Ok(root)
 }
 
 pub fn data_dir() -> Option<PathBuf> {

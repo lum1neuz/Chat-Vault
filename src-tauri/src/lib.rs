@@ -636,6 +636,7 @@ async fn delete_chat(path: String) -> Result<(), String> {
             return Ok(());
         }
         let p = check_transcript(&path)?;
+        let len = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         let plain = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -653,6 +654,8 @@ async fn delete_chat(path: String) -> Result<(), String> {
         if !status.success() || Path::new(&plain).exists() {
             return Err("The chat file could not be moved to the Recycle Bin".into());
         }
+        // Without this, sync would bring the chat back from the backup folder or the other PC.
+        sync::forget_chat(&p, len);
         index::forget(&path)?;
         index::forget(&plain)?;
         Ok(())
@@ -1235,7 +1238,12 @@ fn account_info() -> Vec<AccountInfo> {
 
 #[tauri::command]
 async fn sync_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
-    tauri::async_runtime::spawn_blocking(move || sync::backup(&app)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || sync::sync_both(Some(&app))).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn set_backup_folder(path: String) -> Result<String, String> {
+    set_backup_root(Path::new(&path)).map(|p| p.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -1296,6 +1304,20 @@ pub fn run() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            // Start with Windows, quietly in the tray, so sync keeps both PCs up to date without opening ChatVault.
+            // ponytail: always on in installed builds; a settings switch could delete this Run entry instead.
+            #[cfg(not(debug_assertions))]
+            if let Ok(exe) = std::env::current_exe() {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                let run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+                let cmd = format!("\"{}\" --tray", exe.display());
+                let _ = Command::new("reg").args(["add", run_key, "/v", "ChatVault", "/t", "REG_SZ", "/d", &cmd, "/f"]).creation_flags(CREATE_NO_WINDOW).status();
+            }
+            // The window starts hidden (tauri.conf.json); show it unless Windows started ChatVault at sign-in.
+            if !std::env::args().any(|a| a == "--tray") {
+                show(app.handle());
+            }
             Ok(())
         })
         // Closing the window keeps ChatVault running in the tray, so backups and live sync carry on. Quit from the tray menu.
@@ -1355,6 +1377,7 @@ pub fn run() {
             account_info,
             sync_chats,
             restore_chats,
+            set_backup_folder,
             backup_status
         ])
         .run(tauri::generate_context!())

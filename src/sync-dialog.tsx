@@ -2,6 +2,7 @@ import { notifyError } from "@/toast";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { DatabaseBackup, FileDown, FolderOpen, Info, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,7 +12,7 @@ import { fmtDate, fmtSize } from "@/chat-actions";
 import { startBulkExport, useBulkExport } from "@/bulk-export";
 
 type Status = { path: string; exists: boolean; files: number; bytes: number; lastSyncMs: number | null };
-type Stats = { copied: number; skipped: number; failed: number; bytes: number; total: number };
+type Stats = { copied: number; skipped: number; failed: number; bytes: number; total: number; pulled: number };
 type Prog = { phase: string; done: number; total: number; current: string };
 
 export const AUTO_SYNC_KEY = "chatvault.autoSync";
@@ -56,15 +57,27 @@ export function SyncDialog({
     try {
       const s = await invoke<Stats>(kind === "sync" ? "sync_chats" : "restore_chats");
       setLast(
-        `${kind === "sync" ? "Copied" : "Restored"} ${s.copied} files (${fmtSize(s.bytes)}). ${s.skipped} were already up to date.${s.failed ? ` ${s.failed} could not be copied.` : ""}`,
+        `${kind === "sync" ? `Took in ${s.pulled} files from the backup folder. Backed up` : "Restored"} ${s.copied} files (${fmtSize(s.bytes)}). ${s.skipped} were already up to date.${s.failed ? ` ${s.failed} could not be copied.` : ""}`,
       );
-      toast(kind === "sync" ? "Chats synced to Documents" : "Missing chats restored");
+      toast(kind === "sync" ? "Chats synced" : "Missing chats restored");
       load();
       onChanged();
     } catch (e) {
       notifyError(e);
     } finally {
       setBusy(null);
+    }
+  };
+
+  const changeFolder = async () => {
+    const dir = await pickFolder({ directory: true, title: "Pick a folder both PCs share, like one in Google Drive" }).catch(() => null);
+    if (typeof dir !== "string") return;
+    try {
+      await invoke("set_backup_folder", { path: dir });
+      load();
+      await run("sync");
+    } catch (e) {
+      notifyError(e);
     }
   };
 
@@ -80,7 +93,7 @@ export function SyncDialog({
             </div>
             <div className="min-w-0">
               <DialogTitle className="text-base font-medium">Sync &amp; backup</DialogTitle>
-              <DialogDescription>Keep a copy of your chats in Documents.</DialogDescription>
+              <DialogDescription>Keep a copy of your chats in a folder, and share it with your other PC.</DialogDescription>
             </div>
           </div>
         </DialogHeader>
@@ -94,6 +107,9 @@ export function SyncDialog({
                   <span>{status?.path || "…"}</span>
                   <Button variant="ghost" size="icon" className="-my-1 size-6 shrink-0 text-muted-foreground" aria-label="Open the backup folder" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
                     <FolderOpen className="size-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="sm" className="-my-1 h-6 shrink-0 px-1.5 font-sans text-xs" disabled={!!busy} onClick={() => void changeFolder()}>
+                    Change
                   </Button>
                 </span>
               }
@@ -151,8 +167,8 @@ export function SyncDialog({
               <RefreshCw className="size-4 text-muted-foreground" strokeWidth={1.5} />
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">Keep backing up automatically</p>
-              <p className="text-xs text-muted-foreground">Runs on open and every 10 minutes.</p>
+              <p className="text-sm font-medium">Keep syncing automatically</p>
+              <p className="text-xs text-muted-foreground">Runs on open, every 3 minutes, and when you come back to ChatVault.</p>
             </div>
             <Switch
               checked={auto}
@@ -165,7 +181,7 @@ export function SyncDialog({
 
           <div role="alert" className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
             <Info className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.5} />
-            <p>Backed-up chats stay visible after you sign out or reinstall. Restore missing only copies back chats that are gone, and never overwrites.</p>
+            <p>Point both PCs at the same shared folder to sync them. Sync first takes in chats the other PC added or continued, then backs this PC up. A chat continued on both PCs at once keeps each PC's own version. Restore missing copies back chats that are gone or behind, and never overwrites a newer one.</p>
           </div>
         </div>
       </DialogContent>

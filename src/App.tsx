@@ -74,7 +74,6 @@ import { TagsDialog } from "@/tags-dialog";
 import { TitleBar } from "@/titlebar";
 import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
 import { chatKey, useChatMeta, usePersisted } from "@/store";
-import { startAutoUpdate } from "@/updater";
 
 const PAGE_SIZE = 20;
 const MSG_PAGE = 80;
@@ -204,15 +203,29 @@ export default function App() {
   useEffect(() => {
     if (!isTauri) return;
     const un = listen<IndexProg>("index-progress", (e) => setIndexing(e.payload.phase === "Done" ? null : e.payload));
+    // Syncing is on unless you turned it off: it takes in chats the other PC put in the backup folder, then backs this
+    // PC up. Once at start, every 3 minutes while ChatVault runs (also from the tray), and when you come back to it.
+    let lastSync = 0;
+    const autoSync = async () => {
+      if (localStorage.getItem(AUTO_SYNC_KEY) === "0") return false;
+      lastSync = Date.now();
+      const s = await invoke<{ copied: number; pulled: number }>("sync_chats").catch(() => null);
+      return !!s && s.copied + s.pulled > 0;
+    };
     void (async () => {
-      // Backing up is on unless you turned it off: once at start, then every 10 minutes while ChatVault is open.
-      if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") await invoke("sync_chats").catch(() => {});
+      await autoSync();
       await rescan();
     })();
-    const every = window.setInterval(() => {
-      if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") void invoke("sync_chats").then(() => rescan()).catch(() => {});
-    }, 10 * 60 * 1000);
-    const stopUpdates = startAutoUpdate();
+    const syncAndRescan = async () => {
+      if (await autoSync()) await rescan();
+    };
+    const every = window.setInterval(() => void syncAndRescan(), 3 * 60 * 1000);
+    const onFocus = () => {
+      if (Date.now() - lastSync > 60 * 1000) void syncAndRescan();
+    };
+    window.addEventListener("focus", onFocus);
+    // ponytail: this fork doesn't auto-update, since the upstream updater would replace it with the original app.
+    // To update, pull upstream into the fork and rebuild; or sign your own releases and point tauri.conf.json at them.
     const offSync = listen("tray-sync", () => setSyncOpen(true));
     const offScan = listen("tray-rescan", () => void rescan());
     return () => {
@@ -220,7 +233,7 @@ export default function App() {
       void offSync.then((f) => f());
       void offScan.then((f) => f());
       window.clearInterval(every);
-      stopUpdates();
+      window.removeEventListener("focus", onFocus);
     };
   }, [rescan]);
 
