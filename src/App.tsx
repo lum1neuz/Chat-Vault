@@ -41,6 +41,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { AppToaster, notify, notifyError, runAction } from "@/toast";
+import { initBulkExport } from "@/bulk-export";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
@@ -120,6 +121,9 @@ export default function App() {
   const [splash, setSplash] = useState<"on" | "leaving" | "off">("on");
   const bootAt = useRef(Date.now());
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    initBulkExport();
+  }, []);
   // A failed scan or query used to disappear silently; it now shows as an error toast.
   useEffect(() => {
     if (error) notifyError(error);
@@ -776,7 +780,7 @@ export default function App() {
                 <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
               </Button>
             </Tip>
-            <Tip label="Copy every chat from all your AI tools to your Documents folder, or restore them.">
+            <Tip label="Back up or restore your chats.">
               <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>
                 <DatabaseBackup className="size-4" /> Sync &amp; backup
               </Button>

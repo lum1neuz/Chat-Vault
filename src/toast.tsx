@@ -56,3 +56,13 @@ export function AppToaster() {
     />
   );
 }
+
+/** A toast that stays up and can be updated while a long job runs. Reuse the same id for every update. */
+export function progressToast(id: string, message: string) {
+  return hot.loading(message, { id });
+}
+
+/** Replaces a progress toast with the result. */
+export function finishToast(id: string, message: string, ok = true) {
+  return ok ? hot.success(message, { id, duration: 7000 }) : hot.error(message, { id, duration: 8000 });
+}

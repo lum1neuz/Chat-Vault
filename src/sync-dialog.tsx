@@ -2,13 +2,13 @@ import { notifyError } from "@/toast";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DatabaseBackup, FileDown, FolderOpen, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
-import { open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { DatabaseBackup, FileDown, FolderOpen, Info, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { fmtDate, fmtSize } from "@/chat-actions";
+import { startBulkExport, useBulkExport } from "@/bulk-export";
 
 type Status = { path: string; exists: boolean; files: number; bytes: number; lastSyncMs: number | null };
 type Stats = { copied: number; skipped: number; failed: number; bytes: number; total: number };
@@ -31,6 +31,7 @@ export function SyncDialog({
   const [busy, setBusy] = useState<"sync" | "restore" | null>(null);
   const [prog, setProg] = useState<Prog | null>(null);
   const [last, setLast] = useState<string | null>(null);
+  const exp = useBulkExport();
   const [auto, setAuto] = useState(() => localStorage.getItem(AUTO_SYNC_KEY) !== "0");
 
   const load = useCallback(() => {
@@ -60,21 +61,6 @@ export function SyncDialog({
       toast(kind === "sync" ? "Chats synced to Documents" : "Missing chats restored");
       load();
       onChanged();
-    } catch (e) {
-      notifyError(e);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const exportAll = async () => {
-    const folder = await pickFolder({ directory: true, title: "Choose a folder for the Markdown files" });
-    if (!folder || typeof folder !== "string") return;
-    setBusy("sync");
-    try {
-      const r = await invoke<{ written: number; skipped: number; folder: string }>("export_all_markdown", { folder, provider: null });
-      toast(`Exported ${r.written.toLocaleString()} chats as Markdown`);
-      void invoke("reveal_in_folder", { path: r.folder }).catch(() => {});
     } catch (e) {
       notifyError(e);
     } finally {
@@ -136,9 +122,29 @@ export function SyncDialog({
             </Button>
           </div>
 
-          <Button variant="outline" className="w-full" disabled={!!busy} onClick={() => void exportAll()}>
-            <FileDown className="size-4" /> Export all chats as Markdown
-          </Button>
+
+          <div className="rounded-lg border p-3">
+            <div className="flex items-center gap-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                <FileDown className="size-4 text-muted-foreground" strokeWidth={1.5} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">Export all chats as Markdown</p>
+                <p className="text-xs text-muted-foreground">One .md file per chat. Exporting again replaces them.</p>
+              </div>
+              <Button variant="outline" size="sm" className="shrink-0" disabled={exp.running} onClick={() => void startBulkExport()}>
+                {exp.running ? <Loader2 className="size-4 animate-spin" /> : <FileDown className="size-4" />} {exp.running ? "Exporting" : "Export"}
+              </Button>
+            </div>
+            {exp.running && (
+              <div className="mt-3 space-y-1.5">
+                <Progress value={exp.total ? Math.round((exp.done / exp.total) * 100) : null} />
+                <p className="truncate text-xs text-muted-foreground">
+                  {exp.total ? `${exp.done.toLocaleString()} of ${exp.total.toLocaleString()}${exp.current ? ` · ${exp.current}` : ""}` : "Getting ready…"} · you can close this window
+                </p>
+              </div>
+            )}
+          </div>
 
           <div className="flex items-center gap-3 rounded-lg border p-3">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
@@ -146,7 +152,7 @@ export function SyncDialog({
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">Keep backing up automatically</p>
-              <p className="text-xs text-muted-foreground">Syncs when ChatVault opens and every 10 minutes. Only new and changed chats are copied.</p>
+              <p className="text-xs text-muted-foreground">Runs on open and every 10 minutes.</p>
             </div>
             <Switch
               checked={auto}
@@ -157,11 +163,10 @@ export function SyncDialog({
             />
           </div>
 
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            ChatVault also reads the backup folder, so your chats stay visible after you sign out or reinstall your AI tools.
-            &quot;Restore missing&quot; copies back only the chats that are gone, so Claude and Codex can list them again (Gemini CLI and Cline too). Nothing is ever
-            overwritten or deleted.
-          </p>
+          <div role="alert" className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+            <Info className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.5} />
+            <p>Backed-up chats stay visible after you sign out or reinstall. Restore missing only copies back chats that are gone, and never overwrites.</p>
+          </div>
         </div>
       </DialogContent>
     </Dialog>

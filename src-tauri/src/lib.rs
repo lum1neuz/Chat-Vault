@@ -690,72 +690,6 @@ fn open_in_claude(local_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Writes a text file to a path the user picked in the system Save dialog. Only .md, .txt, .html and .json files are written.
-#[derive(Serialize)]
-struct ExportResult {
-    written: usize,
-    skipped: usize,
-    folder: String,
-}
-
-/// Saves chats as Markdown files in a folder the user picked, one subfolder per tool. A tool name restricts it to that tool.
-#[tauri::command]
-async fn export_all_markdown(folder: String, provider: Option<String>) -> Result<ExportResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = PathBuf::from(&folder);
-        if !root.is_dir() {
-            return Err("That folder does not exist".to_string());
-        }
-        let tools: Vec<&str> = match provider.as_deref() {
-            Some(p) if ["claude", "codex", "cursor", "gemini", "opencode", "cline"].contains(&p) => vec![p],
-            _ => vec!["claude", "codex", "cursor", "gemini", "opencode", "cline"],
-        };
-        let (mut written, mut skipped) = (0usize, 0usize);
-        for tool in tools {
-            let dir = root.join(match tool { "claude" => "Claude Code", "codex" => "Codex", "cursor" => "Cursor", "gemini" => "Gemini CLI", "opencode" => "OpenCode", _ => "Cline" });
-            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            for (id, path) in index::recent_paths(tool, 20000)? {
-                let msgs: Vec<Msg> = if is_virtual(tool) {
-                    read_virtual(tool, &path).unwrap_or_default().into_iter().filter(is_readable).collect()
-                } else {
-                    let Some(lines) = open_lines(Path::new(&path)) else { skipped += 1; continue };
-                    let mut out = Vec::new();
-                    for line in lines {
-                        if !relevant(tool, &line) {
-                            continue;
-                        }
-                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                            out.extend(messages_for(tool, &v).into_iter().filter(is_readable));
-                        }
-                    }
-                    out
-                };
-                if msgs.is_empty() {
-                    skipped += 1;
-                    continue;
-                }
-                let title = msgs.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 60)).unwrap_or_else(|| "Chat".into());
-                let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
-                let mut md = format!("# {}\n\n- Tool: {}\n- Chat id: {}\n\n", title, dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), id);
-                for m in &msgs {
-                    let who = if m.role == "user" { "You" } else { "Assistant" };
-                    md.push_str(&format!("## {} {}\n\n{}\n\n", who, m.ts, m.text.trim()));
-                }
-                let short: String = id.chars().take(8).collect();
-                let file = dir.join(format!("{}-{}.md", safe.trim().trim_end_matches('…'), short));
-                if fs::write(&file, md).is_ok() {
-                    written += 1;
-                } else {
-                    skipped += 1;
-                }
-            }
-        }
-        Ok(ExportResult { written, skipped, folder })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 #[tauri::command]
 fn set_chat_tags(provider: String, id: String, tags: Vec<String>) -> Result<(), String> {
     provider_ok(&provider)?;
@@ -987,6 +921,134 @@ fn write_image_file(path: String, bytes: Vec<u8>) -> Result<String, String> {
     Ok(path)
 }
 
+/// True while a bulk export runs, so a second one cannot start on top of it.
+static EXPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgress {
+    done: usize,
+    total: usize,
+    current: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ExportDone {
+    written: usize,
+    skipped: usize,
+    folder: String,
+    seconds: u64,
+    error: Option<String>,
+}
+
+const EXPORT_TOOLS: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline")];
+
+/// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
+/// exporting again to the same folder replaces the earlier files instead of piling up copies.
+fn chat_markdown(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(String, String)> {
+    let msgs: Vec<Msg> = if is_virtual(tool) {
+        read_virtual(tool, path).unwrap_or_default().into_iter().filter(is_readable).collect()
+    } else {
+        let lines = open_lines(Path::new(path))?;
+        let mut out = Vec::new();
+        for line in lines {
+            if !relevant(tool, &line) {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                out.extend(messages_for(tool, &v).into_iter().filter(is_readable));
+            }
+        }
+        out
+    };
+    if msgs.is_empty() {
+        return None;
+    }
+    let title = msgs.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 60)).unwrap_or_else(|| "Chat".into());
+    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
+    let mut md = format!("# {}\n\n- Tool: {}\n- Chat id: {}\n\n", title, tool_name, id);
+    for m in &msgs {
+        let who = if m.role == "user" { "You" } else { "Assistant" };
+        md.push_str(&format!("## {} {}\n\n{}\n\n", who, m.ts, m.text.trim()));
+    }
+    // A fixed fingerprint of the whole id: two chats with similar ids (Codex ids start alike) never share a file name.
+    let short = id.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    Some((format!("{}-{:08x}.md", safe.trim().trim_end_matches('…'), short), md))
+}
+
+/// Starts saving every chat as a Markdown file in the chosen folder, one subfolder per tool, and returns at once. The work
+/// runs on its own thread and reports through `export-progress` and `export-done`, so the window never waits for it.
+#[tauri::command]
+fn export_all_markdown(app: AppHandle, folder: String) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+    let root = PathBuf::from(&folder);
+    if !root.is_dir() {
+        return Err("That folder does not exist".into());
+    }
+    if EXPORTING.swap(true, Ordering::SeqCst) {
+        return Err("An export is already running".into());
+    }
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let run = || -> Result<(usize, usize), String> {
+            let mut jobs: Vec<(&str, &str, String, String)> = Vec::new();
+            for (tool, name) in EXPORT_TOOLS {
+                for (id, path) in index::recent_paths(tool, 1_000_000)? {
+                    jobs.push((tool, name, id, path));
+                }
+            }
+            let total = jobs.len();
+            let (mut written, mut skipped) = (0usize, 0usize);
+            let mut last_emit = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            let _ = app.emit("export-progress", ExportProgress { done: 0, total, current: String::new() });
+            for (i, (tool, name, id, path)) in jobs.iter().enumerate() {
+                match chat_markdown(tool, name, id, path) {
+                    Some((file, md)) => {
+                        let dir = root.join(name);
+                        let target = dir.join(&file);
+                        let temp = dir.join(format!("{}.tmp", file));
+                        // Written to a temporary file first, so an interrupted export never leaves a half file behind.
+                        if fs::create_dir_all(&dir).is_ok() && fs::write(&temp, md).is_ok() && fs::rename(&temp, &target).is_ok() {
+                            written += 1;
+                        } else {
+                            let _ = fs::remove_file(&temp);
+                            skipped += 1;
+                        }
+                    }
+                    None => skipped += 1,
+                }
+                if last_emit.elapsed() >= std::time::Duration::from_millis(200) || i + 1 == total {
+                    last_emit = std::time::Instant::now();
+                    let _ = app.emit("export-progress", ExportProgress { done: i + 1, total, current: clip(&file_stem_of(path), 60) });
+                }
+            }
+            Ok((written, skipped))
+        };
+        let result = run();
+        EXPORTING.store(false, Ordering::SeqCst);
+        let seconds = started.elapsed().as_secs();
+        let done = match result {
+            Ok((written, skipped)) => ExportDone { written, skipped, folder, seconds, error: None },
+            Err(e) => ExportDone { written: 0, skipped: 0, folder, seconds, error: Some(e) },
+        };
+        let _ = app.emit("export-done", done);
+    });
+    Ok(())
+}
+
+fn file_stem_of(path: &str) -> String {
+    Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// Whether a bulk export is running right now, so a reopened dialog can show it.
+#[tauri::command]
+fn export_running() -> bool {
+    EXPORTING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Writes a text file to a path the user picked in the system Save dialog. Only .md, .txt, .html and .json files are written.
 #[tauri::command]
 fn write_text_file(path: String, content: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
@@ -1260,6 +1322,8 @@ pub fn run() {
             files_fingerprint,
             send_message,
             write_text_file,
+            export_all_markdown,
+            export_running,
             write_image_file,
             set_chat_archived,
             read_text_file,
@@ -1270,7 +1334,6 @@ pub fn run() {
             set_chat_tags,
             chat_tags,
             all_tags,
-            export_all_markdown,
             agent_running,
             take_agent_error,
             agent_login,
@@ -1336,5 +1399,48 @@ mod tests {
         }
         println!("  parsed {} messages ({} text) in {:?}", n, text, t.elapsed());
         assert!(text > 0);
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    /// Exports the newest chats twice into the same folder: the second run must replace the files, not add more.
+    #[test]
+    #[ignore = "reads the real chat index on this PC"]
+    fn export_twice_overwrites() {
+        let dir = std::env::temp_dir().join("chatvault-export-test");
+        let _ = fs::remove_dir_all(&dir);
+        let mut counts = Vec::new();
+        for _ in 0..2 {
+            let started = std::time::Instant::now();
+            let mut written = 0;
+            for (tool, name) in EXPORT_TOOLS {
+                let Ok(rows) = index::recent_paths(tool, 150) else { continue };
+                for (id, path) in rows {
+                    if let Some((file, md)) = chat_markdown(tool, name, &id, &path) {
+                        let d = dir.join(name);
+                        fs::create_dir_all(&d).unwrap();
+                        let t = d.join(format!("{}.tmp", file));
+                        fs::write(&t, md).unwrap();
+                        fs::rename(&t, d.join(&file)).unwrap();
+                        written += 1;
+                    }
+                }
+            }
+            let files = walkdir_count(&dir);
+            println!("run: wrote {} chats, {} files on disk, {:?}", written, files, started.elapsed());
+            counts.push(files);
+        }
+        assert_eq!(counts[0], counts[1], "the second export must replace the files");
+        assert!(counts[0] > 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn walkdir_count(p: &Path) -> usize {
+        let mut v = Vec::new();
+        walk_files(p, &["md", "tmp"], &mut v);
+        v.len()
     }
 }

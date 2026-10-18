@@ -6,7 +6,7 @@
 
 **One place to read, search, back up and continue every AI coding chat on your PC.**
 
-Claude Code · Codex · Cursor — across every account you have ever signed in with.
+Claude Code · Codex · Cursor · Gemini CLI · OpenCode · Cline — across every account you have ever signed in with.
 
 [![Latest release](https://img.shields.io/github/v/release/ssanaullahrais/Chat-Vault?style=flat-square&label=release)](https://github.com/ssanaullahrais/Chat-Vault/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ssanaullahrais/Chat-Vault/total?style=flat-square)](https://github.com/ssanaullahrais/Chat-Vault/releases)
@@ -32,9 +32,9 @@ Claude Code · Codex · Cursor — across every account you have ever signed in 
 
 ## Why ChatVault?
 
-Claude, Codex and Cursor keep your chats on your computer, but each app only shows the chats of the account that is signed in right now. Sign out, switch accounts or reinstall, and your history seems to vanish, even though the files are still on disk.
+Claude Code, Codex, Cursor, Gemini CLI, OpenCode and Cline keep your chats on your computer, but each app only shows the chats of the account that is signed in right now. Sign out, switch accounts or reinstall, and your history seems to vanish, even though the files are still on disk.
 
-ChatVault finds those files, lists them in one fast window, and lets you read them, search them, back them up and **pick the work up again in another tool without losing the context**.
+ChatVault finds those files, lists them in one fast window, and lets you read them, search them across every tool, back them up, save them as Markdown, HTML, text or JSON, and **pick the work up again in any other tool without losing the context**. A handoff file carries the whole chat, so the new tool starts from where you stopped.
 
 ## Download
 
