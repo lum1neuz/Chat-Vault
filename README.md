@@ -19,7 +19,10 @@ Claude Code · Codex · Cursor — across every account you have ever signed in 
 </div>
 
 <p align="center">
-  <img src="docs/screenshots/01-overview.png" alt="ChatVault overview with sample data" width="900" />
+  <img src="docs/screenshots/01-home.png" alt="ChatVault home: activity, storage and recent chats across every tool, with sample data" width="900" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/02-chat.png" alt="A chat open in ChatVault with its plan, tool steps, table and code, with sample data" width="900" />
 </p>
 <p align="center"><sub>All screenshots use sample data, not real chats.</sub></p>
 
